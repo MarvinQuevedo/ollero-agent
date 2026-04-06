@@ -1,10 +1,26 @@
-// Ollero CLI - Local code agent powered by Ollama
-// This is a small safe change: added comment documentation
+mod config;
+mod input;
+mod ollama;
+mod permissions;
+mod repl;
+mod setup;
+mod tools;
+mod workspace;
 
-use colored::{Colorize};
 use std::env;
 
-fn main() {
-    let version = env!("CARGO_PKG_VERSION");
-    println!("{} v{}", "Ollero CLI".bold().green(), version);
+use anyhow::Result;
+use config::Config;
+use repl::Repl;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let config = match Config::load()? {
+        Some(cfg) => cfg,
+        None => setup::run_wizard().await?,
+    };
+
+    let workspace_root = env::current_dir()?;
+    let mut repl = Repl::new(config, workspace_root);
+    repl.run().await
 }

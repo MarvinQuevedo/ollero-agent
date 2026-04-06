@@ -8,10 +8,8 @@ use anyhow::Result;
 
 use crate::tools;
 
-/// Cap to prevent excessively large context windows when building auto-scan output.
 const MAX_SCAN_BYTES: usize = 100_000;
 /// Max paths listed in the combined “source files” section (after filtering).
-/// Cap on listed paths to prevent context window overflow; 280 keeps token usage safe.
 const MAX_LISTED_PATHS: usize = 280;
 
 /// Path segments that usually mean dependencies / build output — skip in globs.
@@ -79,8 +77,7 @@ const SOURCE_GLOBS: &[&str] = &[
     "**/jsconfig.json",
 ];
 
-/// Detect if the user is asking for a broad repository read/status request.
-/// Matches key phrases in both English and Spanish that imply file-level context is needed.
+/// True if the user message is asking for a broad read / status of the repo.
 pub fn should_trigger(msg: &str) -> bool {
     let m = msg.to_lowercase();
     let t = m.trim();
@@ -149,7 +146,6 @@ fn should_list_path(path: &str) -> bool {
 }
 
 /// Collect paths from several globs, dedupe, filter noisy dirs, cap count.
-/// Uses BTreeSet for automatic sorting and deduplication.
 fn collect_source_paths(base: &str) -> String {
     let mut set: BTreeSet<String> = BTreeSet::new();
     let mut capped = false;

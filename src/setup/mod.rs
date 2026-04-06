@@ -9,7 +9,10 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 
-use crate::{config::Config, ollama::client::OllamaClient};
+use crate::{
+    config::{Config, CONFIG_VERSION},
+    ollama::client::OllamaClient,
+};
 
 /// Run the first-time setup wizard. Returns the configured Config.
 pub async fn run_wizard() -> Result<Config> {
@@ -75,7 +78,12 @@ pub async fn run_wizard() -> Result<Config> {
     let model = select_model(&models)?;
 
     // ── Save ──────────────────────────────────────────────────────────────
-    let config = Config { ollama_url, model, context_size: 8192 };
+    let config = Config {
+        config_version: CONFIG_VERSION.to_string(),
+        ollama_url,
+        model,
+        context_size: 8192,
+    };
     config.save()?;
 
     println!();
