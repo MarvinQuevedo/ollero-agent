@@ -17,6 +17,12 @@ type Options = {
   prompt: string;
   readyToken: string;
   exitOnReady: boolean;
+  requireWrite: boolean;
+  requireValidation: string;
+  requireValidationSuccess: boolean;
+  writeAllowRegex: string;
+  prewriteMaxInspectRounds: number;
+  prevalidationMaxPostWriteRounds: number;
 };
 
 const DEFAULTS: Options = {
@@ -31,6 +37,12 @@ const DEFAULTS: Options = {
     "You are working in the current local repo. Apply one small safe Rust improvement, validate with cargo check, and report the change.",
   readyToken: "CLI_READY_TO_RESTART",
   exitOnReady: true,
+  requireWrite: true,
+  requireValidation: "cargo check|cargo test",
+  requireValidationSuccess: true,
+  writeAllowRegex: "^src/|^scripts/ollero-cli\\.ts$",
+  prewriteMaxInspectRounds: 2,
+  prevalidationMaxPostWriteRounds: 1,
 };
 
 function now(): string {
@@ -72,6 +84,24 @@ function parseArgs(argv: string[]): Options {
   if (typeof flags.get("prompt") === "string") options.prompt = String(flags.get("prompt"));
   if (typeof flags.get("ready-token") === "string") options.readyToken = String(flags.get("ready-token"));
   if (flags.has("no-exit-on-ready")) options.exitOnReady = false;
+  if (flags.has("no-require-write")) options.requireWrite = false;
+  if (typeof flags.get("require-validation") === "string") {
+    options.requireValidation = String(flags.get("require-validation"));
+  }
+  if (flags.has("allow-failed-validation")) {
+    options.requireValidationSuccess = false;
+  }
+  if (typeof flags.get("write-allow-regex") === "string") {
+    options.writeAllowRegex = String(flags.get("write-allow-regex"));
+  }
+  if (typeof flags.get("prewrite-max-inspect-rounds") === "string") {
+    options.prewriteMaxInspectRounds = Number(flags.get("prewrite-max-inspect-rounds"));
+  }
+  if (typeof flags.get("prevalidation-max-postwrite-rounds") === "string") {
+    options.prevalidationMaxPostWriteRounds = Number(
+      flags.get("prevalidation-max-postwrite-rounds"),
+    );
+  }
 
   if (positional.length > 0) {
     options.prompt = positional.join(" ");
@@ -86,11 +116,22 @@ async function sha256File(filePath: string): Promise<string> {
 }
 
 function buildCliArgs(options: Options): string[] {
+  const strictContract = [
+    "Mandatory execution contract:",
+    "1) Perform at least one real write_file or replace_in_file operation.",
+    "2) The edited path must satisfy the allowed write regex.",
+    "3) Run validation command matching required regex (cargo check or cargo test).",
+    "4) If not completed, continue tool-calling and do not finalize with summaries.",
+  ].join(" ");
+  const askPromptWithContract =
+    options.mode === "ask"
+      ? `${options.prompt}\n\n${strictContract}`
+      : options.prompt;
   const common = [
     "--experimental-strip-types",
     "scripts/ollero-cli.ts",
     options.mode,
-    options.mode === "run" ? options.taskId : options.prompt,
+    options.mode === "run" ? options.taskId : askPromptWithContract,
     "--autonomous",
     "--verbose",
     "--model",
@@ -102,6 +143,26 @@ function buildCliArgs(options: Options): string[] {
     "--ready-token",
     options.readyToken,
   ];
+  if (options.requireWrite) {
+    common.push("--require-write");
+  }
+  if (options.requireValidation.trim()) {
+    common.push("--require-validation", options.requireValidation);
+  }
+  if (!options.requireValidationSuccess) {
+    common.push("--allow-failed-validation");
+  }
+  if (options.writeAllowRegex.trim()) {
+    common.push("--write-allow-regex", options.writeAllowRegex);
+  }
+  common.push(
+    "--prewrite-max-inspect-rounds",
+    String(Math.max(0, options.prewriteMaxInspectRounds)),
+  );
+  common.push(
+    "--prevalidation-max-postwrite-rounds",
+    String(Math.max(0, options.prevalidationMaxPostWriteRounds)),
+  );
   return common;
 }
 
@@ -133,7 +194,7 @@ async function main() {
   log(`watching CLI file: ${cliPath}`);
   log(`initial hash: ${previousHash.slice(0, 12)}...`);
   log(
-    `config -> mode=${options.mode} model=${options.model} maxRounds=${options.maxRounds} intervalMs=${options.intervalMs} cycles=${options.cycles || "infinite"} readyToken=${options.readyToken} exitOnReady=${options.exitOnReady}`,
+    `config -> mode=${options.mode} model=${options.model} maxRounds=${options.maxRounds} intervalMs=${options.intervalMs} cycles=${options.cycles || "infinite"} readyToken=${options.readyToken} exitOnReady=${options.exitOnReady} requireWrite=${options.requireWrite} requireValidation=${options.requireValidation} requireValidationSuccess=${options.requireValidationSuccess} writeAllowRegex=${options.writeAllowRegex} prewriteMaxInspectRounds=${options.prewriteMaxInspectRounds} prevalidationMaxPostWriteRounds=${options.prevalidationMaxPostWriteRounds}`,
   );
 
   while (options.cycles <= 0 || cycle < options.cycles) {
@@ -153,7 +214,7 @@ async function main() {
 
     if (exitCode !== 0) {
       if (exitCode === 42) {
-        log("child reported 'not ready yet' (ready token missing), restarting automatically");
+        log("child reported unmet readiness gates (token/write/validation), restarting automatically");
       } else {
         log("cycle ended with non-zero code, restarting automatically after delay");
       }

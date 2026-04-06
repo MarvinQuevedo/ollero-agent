@@ -8,8 +8,10 @@ use anyhow::Result;
 
 use crate::tools;
 
+/// Cap to prevent excessively large context windows when building auto-scan output.
 const MAX_SCAN_BYTES: usize = 100_000;
 /// Max paths listed in the combined “source files” section (after filtering).
+/// Cap on listed paths to prevent context window overflow; 280 keeps token usage safe.
 const MAX_LISTED_PATHS: usize = 280;
 
 /// Path segments that usually mean dependencies / build output — skip in globs.

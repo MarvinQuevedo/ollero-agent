@@ -49,6 +49,12 @@ type CliOptions = {
   autoRecoverOllama: boolean;
   ollamaRestartCmd?: string;
   ollamaRecoverRetries: number;
+  requireWrite: boolean;
+  requireValidation?: string;
+  requireValidationSuccess: boolean;
+  prewriteMaxInspectRounds: number;
+  writeAllowRegex?: string;
+  prevalidationMaxPostWriteRounds: number;
 };
 
 type RunOutcome = {
@@ -70,6 +76,8 @@ const MAX_TOOL_OUTPUT_CHARS = 12_000;
 const DEFAULT_PROMPTS_OUT = "validation/generated-prompts.txt";
 const DEFAULT_PROMPT_COUNT = 8;
 const DEFAULT_OLLAMA_RECOVER_RETRIES = 2;
+const DEFAULT_PREWRITE_MAX_INSPECT_ROUNDS = 4;
+const DEFAULT_PREVALIDATION_MAX_POSTWRITE_ROUNDS = 2;
 
 const execAsync = promisify(execCb);
 const execFileAsync = promisify(execFileCb);
@@ -172,6 +180,23 @@ function parseArgs(argv: string[]) {
     ollamaRecoverRetries: Number(
       flags.get("ollama-recover-retries") ?? DEFAULT_OLLAMA_RECOVER_RETRIES,
     ),
+    requireWrite: flags.has("require-write"),
+    requireValidation:
+      typeof flags.get("require-validation") === "string"
+        ? String(flags.get("require-validation"))
+        : undefined,
+    requireValidationSuccess: !flags.has("allow-failed-validation"),
+    prewriteMaxInspectRounds: Number(
+      flags.get("prewrite-max-inspect-rounds") ?? DEFAULT_PREWRITE_MAX_INSPECT_ROUNDS,
+    ),
+    writeAllowRegex:
+      typeof flags.get("write-allow-regex") === "string"
+        ? String(flags.get("write-allow-regex"))
+        : undefined,
+    prevalidationMaxPostWriteRounds: Number(
+      flags.get("prevalidation-max-postwrite-rounds") ??
+        DEFAULT_PREVALIDATION_MAX_POSTWRITE_ROUNDS,
+    ),
   };
 
   return { command, positional, options };
@@ -213,6 +238,12 @@ function printHelp() {
       "  --no-ollama-recover Disable automatic Ollama recovery",
       "  --ollama-restart-cmd <cmd> Optional command to restart Ollama process/service",
       `  --ollama-recover-retries <n> Default: ${DEFAULT_OLLAMA_RECOVER_RETRIES}`,
+      "  --require-write  Require at least one file write/edit in the run",
+      "  --require-validation <regex> Require a matching validation command/output (e.g. \"cargo check|cargo test\")",
+      "  --allow-failed-validation Accept validation attempts even if command fails",
+      `  --prewrite-max-inspect-rounds <n> Default: ${DEFAULT_PREWRITE_MAX_INSPECT_ROUNDS}`,
+      `  --prevalidation-max-postwrite-rounds <n> Default: ${DEFAULT_PREVALIDATION_MAX_POSTWRITE_ROUNDS}`,
+      "  --write-allow-regex <regex> Restrict write/replace paths (e.g. \"^src/|^scripts/\")",
       "  --dry-run        Print request without sending",
     ].join("\n"),
   );
@@ -1019,6 +1050,29 @@ async function runPrompt(
   let totalPrompt = 0;
   let totalCompletion = 0;
   let totalToolCalls = 0;
+  let writeOps = 0;
+  let validationHits = 0;
+  let validationSuccessHits = 0;
+  let validationFailureHits = 0;
+  let validationRegex: RegExp | null = null;
+  let writeAllowRegex: RegExp | null = null;
+  if (options.requireValidation) {
+    try {
+      validationRegex = new RegExp(options.requireValidation, "i");
+    } catch {
+      validationRegex = new RegExp(
+        options.requireValidation.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+        "i",
+      );
+    }
+  }
+  if (options.writeAllowRegex) {
+    try {
+      writeAllowRegex = new RegExp(options.writeAllowRegex);
+    } catch {
+      writeAllowRegex = null;
+    }
+  }
 
   for (let round = 1; round <= Math.max(1, options.maxRounds); round += 1) {
     logStep(options, `round ${round}: calling model ${options.model}`);
@@ -1042,6 +1096,21 @@ async function runPrompt(
     }
 
     if (!toolCalls.length) {
+      if (
+        validationRegex &&
+        validationFailureHits > 0 &&
+        validationSuccessHits === 0 &&
+        round < Math.max(1, options.maxRounds)
+      ) {
+        const followup =
+          "Validation failed in previous attempt. You must now edit files to fix the validation errors and then run cargo check or cargo test again. Do not stop with summaries.";
+        messages.push({ role: "user", content: followup });
+        logStep(
+          options,
+          `round ${round}: no tool calls but validation previously failed, forcing follow-up`,
+        );
+        continue;
+      }
       logStep(options, `round ${round}: no tool calls, stopping loop`);
       break;
     }
@@ -1052,6 +1121,65 @@ async function runPrompt(
 
     for (const call of toolCalls) {
       try {
+        const forcedWriteMode =
+          options.requireWrite &&
+          writeOps === 0 &&
+          round > Math.max(0, options.prewriteMaxInspectRounds);
+        const forcedValidationMode =
+          !!validationRegex &&
+          writeOps > 0 &&
+          validationHits === 0 &&
+          round >
+            Math.max(
+              0,
+              options.prewriteMaxInspectRounds + options.prevalidationMaxPostWriteRounds,
+            );
+        if (forcedWriteMode) {
+          const toolName = call.function.name;
+          const isEditTool = toolName === "write_file" || toolName === "replace_in_file";
+          if (!isEditTool) {
+            const blocked =
+              "Action blocked: you must perform a real file edit now using write_file or replace_in_file before any more inspect commands.";
+            trace.push(`### Tool ${toolName}\n\n${blocked}\n`);
+            messages.push({
+              role: "tool",
+              tool_name: toolName,
+              content: blocked,
+            });
+            logStep(
+              options,
+              `forced-write-mode blocked tool '${toolName}' at round ${round}`,
+            );
+            continue;
+          }
+        }
+        if (forcedValidationMode) {
+          const toolName = call.function.name;
+          const argsObj =
+            typeof call.function.arguments === "object" && call.function.arguments !== null
+              ? (call.function.arguments as Record<string, unknown>)
+              : {};
+          const commandText = String(argsObj.command ?? "");
+          const isValidatingBash =
+            toolName === "bash" &&
+            validationRegex &&
+            validationRegex.test(commandText);
+          if (!isValidatingBash) {
+            const blocked =
+              "Action blocked: you must run a validation command now (e.g., cargo check or cargo test) before other actions.";
+            trace.push(`### Tool ${toolName}\n\n${blocked}\n`);
+            messages.push({
+              role: "tool",
+              tool_name: toolName,
+              content: blocked,
+            });
+            logStep(
+              options,
+              `forced-validation-mode blocked tool '${toolName}' at round ${round}`,
+            );
+            continue;
+          }
+        }
         if (
           options.readyToken &&
           call.function.name === "write_file" &&
@@ -1068,14 +1196,73 @@ async function runPrompt(
           });
           continue;
         }
+        if (
+          writeAllowRegex &&
+          (call.function.name === "write_file" || call.function.name === "replace_in_file")
+        ) {
+          const argsObj =
+            typeof call.function.arguments === "object" && call.function.arguments !== null
+              ? (call.function.arguments as Record<string, unknown>)
+              : {};
+          const candidatePath = String(argsObj.path ?? "");
+          if (!writeAllowRegex.test(candidatePath)) {
+            const blocked = `Blocked write path '${candidatePath}': does not match write-allow-regex '${options.writeAllowRegex}'.`;
+            trace.push(`### Tool ${call.function.name}\n\n${blocked}\n`);
+            messages.push({
+              role: "tool",
+              tool_name: call.function.name,
+              content: blocked,
+            });
+            logStep(options, `write path blocked -> ${candidatePath}`);
+            continue;
+          }
+        }
+        let commandText = "";
+        if (
+          validationRegex &&
+          call.function.name === "bash" &&
+          typeof call.function.arguments === "object" &&
+          call.function.arguments !== null
+        ) {
+          commandText = String(
+            (call.function.arguments as Record<string, unknown>).command ?? "",
+          );
+          if (validationRegex.test(commandText)) {
+            validationHits += 1;
+          }
+        }
         const { name, output } = await dispatchTool(call, options);
         trace.push(`### Tool ${name}\n\n${output}\n`);
+        if (name === "write_file" || name === "replace_in_file") {
+          if (!/No change: old_string not found\./i.test(output)) {
+            writeOps += 1;
+          }
+        }
+        if (validationRegex && name === "bash") {
+          if (validationRegex.test(commandText) || validationRegex.test(output)) {
+            validationSuccessHits += 1;
+          }
+        }
         messages.push({
           role: "tool",
           tool_name: name,
           content: output,
         });
       } catch (err) {
+        if (
+          validationRegex &&
+          call.function.name === "bash" &&
+          typeof call.function.arguments === "object" &&
+          call.function.arguments !== null
+        ) {
+          const commandText = String(
+            (call.function.arguments as Record<string, unknown>).command ?? "",
+          );
+          if (validationRegex.test(commandText)) {
+            validationHits += 1;
+            validationFailureHits += 1;
+          }
+        }
         const output = `Error in tool ${call.function.name}: ${
           err instanceof Error ? err.message : String(err)
         }`;
@@ -1135,6 +1322,10 @@ async function runPrompt(
       `- allow_bash: ${options.allowBash}`,
       `- allow_web: ${options.allowWeb}`,
       `- allow_fs: ${options.allowFs}`,
+      `- write_ops: ${writeOps}`,
+      `- validation_attempts: ${validationHits}`,
+      `- validation_success_hits: ${validationSuccessHits}`,
+      `- validation_failure_hits: ${validationFailureHits}`,
       "",
       "## Trace",
       "",
@@ -1165,6 +1356,32 @@ async function runPrompt(
     } else {
       logStep(options, `ready token detected -> ${options.readyToken}`);
     }
+  }
+  if (options.requireWrite && writeOps === 0) {
+    console.error("Run rejected: no file write/edit operation was performed.");
+    logStep(options, "require-write failed");
+    ok = false;
+  }
+  if (validationRegex && validationHits === 0) {
+    console.error(
+      `Run rejected: no validation command/output matched regex '${options.requireValidation}'.`,
+    );
+    logStep(options, `require-validation failed -> ${options.requireValidation}`);
+    ok = false;
+  }
+  if (
+    validationRegex &&
+    options.requireValidationSuccess &&
+    validationSuccessHits === 0
+  ) {
+    console.error(
+      `Run rejected: validation did not succeed for regex '${options.requireValidation}'.`,
+    );
+    logStep(
+      options,
+      `require-validation-success failed -> ${options.requireValidation}`,
+    );
+    ok = false;
   }
   return { ok, finalText, analysisWarnings, messages };
 }
