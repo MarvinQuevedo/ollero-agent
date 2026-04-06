@@ -1,0 +1,42 @@
+[package]
+name = "ollero"
+version = "0.1.0"
+edition = "2021"
+description = "Local code agent powered by Ollama"
+
+[[bin]]
+name = "ollero"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP client with streaming
+reqwest = { version = "0.12", features = ["json", "stream"] }
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+# JSON serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Async streams
+futures = "0.3"
+# Error handling
+anyhow = "1"
+# Terminal colors (before TUI)
+colored = "2"
+# Config dirs
+dirs = "5"
+# Glob pattern matching (for glob tool)
+glob = "0.3"
+# Regex (for grep tool)
+regex = "1"
+# Temp files (used in tests)
+tempfile = "3"
+# Config file (TOML)
+toml = "0.8"
+# Terminal input (arrow keys, raw mode) — also used later for TUI
+crossterm = "0.28"
+pulldown-cmark = "0.12"
+
+[profile.release]
+opt-level = 3
+strip = true
+lto = true
