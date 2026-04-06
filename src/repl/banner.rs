@@ -4,6 +4,8 @@ use std::path::Path;
 
 use colored::Colorize;
 
+use crate::ollama::types::ResponseStats;
+
 /// Claude Code–style orange accent (RGB).
 pub fn accent(s: &str) -> colored::ColoredString {
     s.truecolor(217, 119, 38)
@@ -14,7 +16,32 @@ pub fn accent_dim(s: &str) -> colored::ColoredString {
 }
 
 /// Shown on the line **above** `>` while editing (keyboard discoverability; avoids cursor bugs under the prompt).
-pub const INPUT_FOOTER: &str = "Ctrl+D exit (empty line) · /help · /quit · Ctrl+C clear line";
+pub const INPUT_FOOTER: &str =
+    "Ctrl+D exit (empty line) · /help · /read <path> · /quit · Ctrl+C clear line";
+
+/// Pretty-print token counts from Ollama (`prompt_eval_count` / `eval_count` on the last stream chunk).
+pub fn print_token_usage(stats: &ResponseStats) {
+    println!(
+        "  {}  {}",
+        accent("◇"),
+        accent_dim(&format!(
+            "{} in  ·  {} out  ·  {} total",
+            fmt_thousands(stats.prompt_tokens),
+            fmt_thousands(stats.completion_tokens),
+            fmt_thousands(stats.total())
+        ))
+    );
+}
+
+fn fmt_thousands(n: u32) -> String {
+    let mut s = n.to_string();
+    let mut i = s.len();
+    while i > 3 {
+        i -= 3;
+        s.insert(i, ',');
+    }
+    s
+}
 
 fn user_display_name() -> String {
     if cfg!(windows) {

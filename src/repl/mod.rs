@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::input::InputReader;
 use crate::permissions::PermissionStore;
 
+mod auto_scan;
 mod banner;
 mod chat_only;
 mod markdown;
@@ -31,11 +32,13 @@ Be concise and precise.";
 
 const SYSTEM_PROMPT_CHAT_ONLY: &str = "\
 You are Ollero, a local code assistant. This session is in chat-only mode: \
-the model cannot call tools (read_file, grep, etc.). Use the workspace snapshot below. \
-For shell steps, put each command (or script) in a fenced block with language bash or sh — the app will offer to run them. \
-For file changes, use a fenced block and put the target path on the opening fence line after the language \
-(e.g. ```markdown SUMMARY.md or ```rust src/lib.rs), or as the first line inside the block as // path: rel/path.rs (or # path: for Python). \
-That lets the app save without asking for a filename. They can enable native tools with /model and a tool-capable model (e.g. llama3.2). Be concise.";
+Ollama does not expose tool calling for this model (e.g. many Gemma builds), so you cannot invoke read_file/grep yourself. \
+The user can load disk context with slash commands: `/read <path>` reads a file into the conversation; `/glob <pattern> [dir]` lists paths; `/tree [path] [depth]` shows a folder tree. \
+For broad questions (e.g. “read my files”, project status), Ollero may auto-attach a tree + file list + key manifests before your reply—use that content; do not say you cannot read files when it is present. \
+Those results appear as user messages—use them to answer. Also use the workspace snapshot below. \
+For shell steps, put each command in a fenced block with language bash or sh — the app will offer to run them; if the user accepts, the command output is stored in the conversation for your next reply. \
+For file changes, put the target path on the opening fence line after the language (e.g. ```rust src/lib.rs) or as // path: rel/path.rs inside the block. \
+To get native tool use back, they can `/model` a tool-capable model (e.g. llama3.2). Be concise.";
 
 const MAX_TOOL_ROUNDS: usize = 10;
 
@@ -125,6 +128,49 @@ enum SlashAction {
     ContextShow,
     ShowMode,
     SetMode(SessionMode),
+    /// Read a file from disk and inject into history (chat-only / any model).
+    ReadFile(String),
+    Glob {
+        pattern: String,
+        dir: Option<String>,
+    },
+    Tree {
+        path: String,
+        depth: usize,
+    },
+}
+
+/// `/tree`, `/tree src`, `/tree src 4`
+fn parse_tree_slash_args(rest: &str) -> (String, usize) {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return (".".to_string(), 3);
+    }
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if parts.len() == 1 {
+        return (parts[0].to_string(), 3);
+    }
+    if let Ok(d) = parts.last().expect("len >= 2").parse::<usize>() {
+        let path = parts[..parts.len() - 1].join(" ");
+        (path, d.clamp(1, 20))
+    } else {
+        (parts.join(" "), 3)
+    }
+}
+
+/// `/glob **/*.rs` or `/glob **/*.rs src`
+fn parse_glob_slash_args(rest: &str) -> Option<(String, Option<String>)> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if parts.len() == 1 {
+        return Some((parts[0].to_string(), None));
+    }
+    let pattern = parts[0].to_string();
+    let dir = parts[1..].join(" ");
+    Some((pattern, Some(dir)))
 }
 
 impl Repl {
@@ -205,6 +251,47 @@ impl Repl {
         }
     }
 
+    /// When the model will not receive tools this turn, expand “read project / status” asks.
+    fn wrap_user_input_with_auto_scan(&self, input: &str) -> String {
+        let agent_will_use_tools = matches!(self.mode, SessionMode::Agent | SessionMode::Plan)
+            && self.model_supports_tools;
+        if agent_will_use_tools || !auto_scan::should_trigger(input) {
+            return input.to_string();
+        }
+        match auto_scan::build_scan(&self.workspace_root) {
+            Ok(scan) if !scan.trim().is_empty() => {
+                println!("{}", "  Gathering project tree and key files…".dimmed());
+                format!("{scan}\n\n---\n**User question:**\n{input}")
+            }
+            Ok(_) => input.to_string(),
+            Err(e) => {
+                eprintln!("{}", format!("  (auto-scan skipped: {e})").dimmed());
+                input.to_string()
+            }
+        }
+    }
+
+    /// Same as [`wrap_user_input_with_auto_scan`], but mutates the last user message (first-turn tool fallback).
+    fn merge_auto_scan_into_last_user_message(&mut self) {
+        let Some(last) = self.history.last_mut() else {
+            return;
+        };
+        if last.role != "user" || !auto_scan::should_trigger(&last.content) {
+            return;
+        }
+        let scan = match auto_scan::build_scan(&self.workspace_root) {
+            Ok(s) if !s.trim().is_empty() => s,
+            Ok(_) => return,
+            Err(e) => {
+                eprintln!("{}", format!("  (auto-scan skipped: {e})").dimmed());
+                return;
+            }
+        };
+        println!("{}", "  Gathering project tree and key files…".dimmed());
+        let q = last.content.clone();
+        last.content = format!("{scan}\n\n---\n**User question:**\n{q}");
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         let mut stdout = io::stdout();
 
@@ -240,7 +327,8 @@ impl Repl {
                 continue;
             }
 
-            self.history.push(Message::user(&input));
+            let user_payload = self.wrap_user_input_with_auto_scan(&input);
+            self.history.push(Message::user(user_payload));
             self.run_agentic_loop(&mut stdout).await;
             println!();
         }
@@ -301,7 +389,8 @@ impl Repl {
                     println!(
                         "{}",
                         format!(
-                            "  ⚠ Model '{}' does not support tools — falling back to chat within this session.",
+                            "  ⚠ Model '{}' does not support tools — falling back to chat for this session.\n\
+                             \x20     Use `/read <path>`, `/glob <pattern>`, `/tree` to load files into context, or `/model llama3.2` (or another tool-capable model).",
                             self.client.model
                         )
                         .yellow()
@@ -309,6 +398,8 @@ impl Repl {
                     self.model_supports_tools = false;
                     self.rebuild_system_prompt();
                     streamed_text.clear();
+
+                    self.merge_auto_scan_into_last_user_message();
 
                     let spin2 = Arc::new(AtomicBool::new(true));
                     let sp2 = spawn_thinking_spinner(spin2.clone());
@@ -358,14 +449,7 @@ impl Repl {
                             println!();
                         }
                     }
-                    println!(
-                        "{}",
-                        format!(
-                            "[tokens — prompt:{} completion:{} total:{}]",
-                            stats.prompt_tokens, stats.completion_tokens, stats.total()
-                        )
-                        .dimmed()
-                    );
+                    banner::print_token_usage(&stats);
                     self.history.push(Message::assistant(&content));
                     return;
                 }
@@ -378,16 +462,7 @@ impl Repl {
                             banner::accent("◇"),
                             format!("Using {} tool(s)…", calls.len()).dimmed()
                         );
-                        println!(
-                            "{}",
-                            format!(
-                                "  [tokens — prompt:{} completion:{} total:{}]",
-                                stats.prompt_tokens,
-                                stats.completion_tokens,
-                                stats.total()
-                            )
-                            .dimmed()
-                        );
+                        banner::print_token_usage(&stats);
                     }
                     self.history.push(Message::assistant_tool_calls(calls.clone()));
                     let tool_messages = self.execute_tool_calls(&calls, stdout).await;
@@ -489,6 +564,7 @@ impl Repl {
     }
 
     /// After a chat-only reply, offer to run extracted shell blocks (not shown as duplicate prose).
+    /// If the user runs the command, stdout/stderr is appended to history so the next message can use it.
     async fn offer_run_suggested_command(&mut self, cmd: &str) {
         let cmd = cmd.trim();
         if cmd.is_empty() {
@@ -507,8 +583,22 @@ impl Repl {
                         if !out.ends_with('\n') {
                             println!();
                         }
+                        let inject = format!(
+                            "The user approved running this suggested shell command in Ollero.\n\n\
+                             **Command:** `{cmd}`\n\n**Output:**\n```\n{out}\n```"
+                        );
+                        self.history.push(Message::user(inject));
+                        println!("{}", "  Output added to conversation context.".dimmed());
                     }
-                    Err(e) => eprintln!("{}", format!("{e}").red()),
+                    Err(e) => {
+                        eprintln!("{}", format!("{e}").red());
+                        let inject = format!(
+                            "The user approved running this suggested shell command in Ollero, but it failed.\n\n\
+                             **Command:** `{cmd}`\n\n**Error:** {e}"
+                        );
+                        self.history.push(Message::user(inject));
+                        println!("{}", "  (failure recorded in conversation context.)".dimmed());
+                    }
                 }
             }
             Ok(_) | Err(_) => {}
@@ -741,6 +831,51 @@ impl Repl {
                     self.mode.label().cyan().bold()
                 );
             }
+            SlashAction::ReadFile(path) => {
+                if path.is_empty() {
+                    println!("{}", "Usage: /read <path>".dimmed());
+                    return;
+                }
+                match tools::run_read_file(&path) {
+                    Ok(text) => {
+                        println!("{}", format!("── {} ──", path).dimmed());
+                        println!("{text}");
+                        let inject = format!(
+                            "The following is the contents of `{path}` (loaded with /read). Use it to answer my questions.\n\n{text}"
+                        );
+                        self.history.push(Message::user(inject));
+                        println!("{}", "  Added to conversation context.".dimmed());
+                    }
+                    Err(e) => eprintln!("{}", format!("{e}").red()),
+                }
+            }
+            SlashAction::Glob { pattern, dir } => {
+                match tools::run_glob(&pattern, dir.as_deref()) {
+                    Ok(text) => {
+                        println!("{}", text);
+                        let inject = format!(
+                            "Glob `{pattern}`{}:\n\n{text}",
+                            dir.as_ref().map(|d| format!(" in `{d}`")).unwrap_or_default()
+                        );
+                        self.history.push(Message::user(inject));
+                        println!("{}", "  Added to conversation context.".dimmed());
+                    }
+                    Err(e) => eprintln!("{}", format!("{e}").red()),
+                }
+            }
+            SlashAction::Tree { path, depth } => {
+                match tools::run_tree(&path, depth) {
+                    Ok(text) => {
+                        println!("{}", text);
+                        let inject = format!(
+                            "Directory tree for `{path}` (depth {depth}, from /tree):\n\n{text}"
+                        );
+                        self.history.push(Message::user(inject));
+                        println!("{}", "  Added to conversation context.".dimmed());
+                    }
+                    Err(e) => eprintln!("{}", format!("{e}").red()),
+                }
+            }
         }
     }
 
@@ -761,6 +896,10 @@ impl Repl {
                  /mode chat         — chat only, no tools\n\
                  /mode agent        — autonomous tool use (default)\n\
                  /mode plan         — show a numbered plan before executing\n\
+                 /read <path>       — read a file and add it to context (works without tool models)\n\
+                 /glob <pat> [dir]  — list matching paths, add to context\n\
+                 /tree [path] [n]   — directory tree (default . depth 3), add to context\n\
+                 (Broad “read project / status” questions auto-attach tree + key files when tools are off.)\n\
                  Chat / no tools: ```bash blocks — run offers; ```lang path/file.md — save uses path (confirm Y/n).\n\
                  Ctrl+C             — clear the current input line"
                     .into(),
@@ -778,6 +917,28 @@ impl Repl {
                 Some(SlashAction::Print(lines.join("\n")))
             }
             "/clear" => Some(SlashAction::ClearHistory),
+            "/read" => Some(SlashAction::Print("Usage: /read <path>".into())),
+            s if s.starts_with("/read ") => {
+                let path = s.trim_start_matches("/read ").trim().to_string();
+                if path.is_empty() {
+                    Some(SlashAction::Print("Usage: /read <path>".into()))
+                } else {
+                    Some(SlashAction::ReadFile(path))
+                }
+            }
+            "/glob" => Some(SlashAction::Print("Usage: /glob <pattern> [dir]".into())),
+            s if s.starts_with("/glob ") => {
+                let rest = s.trim_start_matches("/glob ");
+                match parse_glob_slash_args(rest) {
+                    Some((pattern, dir)) => Some(SlashAction::Glob { pattern, dir }),
+                    None => Some(SlashAction::Print("Usage: /glob <pattern> [dir]".into())),
+                }
+            }
+            s if s == "/tree" || s.starts_with("/tree ") => {
+                let rest = s.strip_prefix("/tree").unwrap_or("").trim();
+                let (path, depth) = parse_tree_slash_args(rest);
+                Some(SlashAction::Tree { path, depth })
+            }
             "/context" => Some(SlashAction::ContextShow),
             s if s.starts_with("/context ") => {
                 let rest = s.trim_start_matches("/context ").trim();

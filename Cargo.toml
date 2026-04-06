@@ -3,6 +3,8 @@ name = "ollero"
 version = "0.1.0"
 edition = "2021"
 description = "Local code agent powered by Ollama"
+authors = ["MarvinQuevedo"]
+license = "GPL-3.0-or-later"
 
 [[bin]]
 name = "ollero"
