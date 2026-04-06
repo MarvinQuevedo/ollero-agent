@@ -30,6 +30,28 @@ Trabajar en cambios pequenos, verificables y acumulables para mejorar `ollero` s
 - `node --experimental-strip-types scripts/ollero-cli.ts run T03 --autonomous`
 - `node --experimental-strip-types scripts/ollero-cli.ts ask "busca docs de ollama tools" --allow-web`
 
+## Cola automatizada (T01–T10 en orden)
+
+Ejecuta las tareas **una por una** con validacion (`cargo test` / patrones por tarea) y parada tras **3 fallos consecutivos**:
+
+```text
+npx tsx scripts/run-task-queue.ts
+```
+
+Por defecto **no** exige escritura de archivos (evita bucles read-only del modelo). Para exigir al menos un `write`/`replace` en tareas de documentacion, usa **`--strict`** o `OLLERO_QUEUE_STRICT=1`.
+
+Solo listar sin ejecutar: `--dry-list`. Desde una tarea: `--from T04`. Hasta una tarea: `--to T06`.
+
+Variables opcionales: `OLLERO_QUEUE_MODEL` (default `qwen3-coder:30b`), `OLLERO_QUEUE_MAX_ROUNDS`, `OLLERO_QUEUE_MAX_ERRORS`.
+
+## Smoke manual (checklist minimo, T06)
+
+- `npx tsx scripts/ollero-cli.ts list` — lista IDs de tareas.
+- `npx tsx scripts/ollero-cli.ts show T01` — muestra prompt de T01.
+- `npx tsx scripts/ollero-cli.ts run T01 --dry-run` — no llama a Ollama.
+- Ollama detenido: una corrida debe fallar con error claro de conexion.
+- Modelo inexistente (`--model no-existe-xyz`): error del servidor o del cliente manejable.
+
 ## TASK T01 - Verificar baseline local
 ### Subtareas
 - Confirmar que Ollama responde y el modelo existe.
