@@ -89,7 +89,7 @@ mod tests {
         assert_eq!(cfg.config_version, CONFIG_VERSION);
         assert_eq!(cfg.ollama_url, "http://localhost:11434");
         assert!(!cfg.model.is_empty());
-        assert!(cfg.context_size > 0);
+        assert_eq!(cfg.context_size, 8192);
     }
 
     #[test]
