@@ -316,6 +316,7 @@ mod tests {
     fn rust_fence_second_token_path() {
         let s = "```rust src/lib.rs\npub fn x() {}\n```";
         let (_d, c, f) = strip_shell_fences(s);
+        assert!(c.is_empty());
         assert_eq!(f[0].suggested_path.as_deref(), Some("src/lib.rs"));
         assert_eq!(f[0].content, "pub fn x() {}");
     }
@@ -324,6 +325,7 @@ mod tests {
     fn leading_slash_slash_path_stripped_from_content() {
         let s = "```rust\n// path: src/foo.rs\nlet n = 1;\n```";
         let (_d, c, f) = strip_shell_fences(s);
+        assert!(c.is_empty());
         assert_eq!(f[0].suggested_path.as_deref(), Some("src/foo.rs"));
         assert_eq!(f[0].content, "let n = 1;");
     }
