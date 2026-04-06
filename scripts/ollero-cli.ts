@@ -55,6 +55,8 @@ type CliOptions = {
   prewriteMaxInspectRounds: number;
   writeAllowRegex?: string;
   prevalidationMaxPostWriteRounds: number;
+  /** If false, refuse write_file on existing files larger than MAX_EXISTING_FILE_FULL_WRITE_CHARS (forces replace_in_file). */
+  allowLargeFullWrite: boolean;
 };
 
 type RunOutcome = {
@@ -78,6 +80,8 @@ const DEFAULT_PROMPT_COUNT = 8;
 const DEFAULT_OLLAMA_RECOVER_RETRIES = 2;
 const DEFAULT_PREWRITE_MAX_INSPECT_ROUNDS = 4;
 const DEFAULT_PREVALIDATION_MAX_POSTWRITE_ROUNDS = 2;
+/** Refuse full-file write_file when target already exists and is this large (UTF-8 chars). Stops weak models from trashing big scripts with partial duplicates. */
+const MAX_EXISTING_FILE_FULL_WRITE_CHARS = 24_000;
 
 const execAsync = promisify(execCb);
 const execFileAsync = promisify(execFileCb);
@@ -124,7 +128,9 @@ const AUTONOMOUS_SYSTEM_PROMPT = [
   "Avoid Unix-only commands like find/head/pwd/command -v.",
   "Use equivalents like Get-ChildItem, Select-Object -First, Get-Location.",
   "You can read and edit files inside the current workspace using file tools.",
-  "Prefer targeted edits: read_file -> replace_in_file/write_file -> verify with shell.",
+  "For existing source files, prefer replace_in_file with a unique old_string; avoid pasting a full copy of a large file into write_file.",
+  "Do not duplicate the same code block in your assistant text as a substitute for a tool edit.",
+  "Prefer targeted edits: read_file -> replace_in_file (small change) -> verify with shell.",
   "Always respond in English.",
   "Keep actions focused and return a concise final answer with what you executed.",
 ].join(" ");
@@ -197,6 +203,7 @@ function parseArgs(argv: string[]) {
       flags.get("prevalidation-max-postwrite-rounds") ??
         DEFAULT_PREVALIDATION_MAX_POSTWRITE_ROUNDS,
     ),
+    allowLargeFullWrite: flags.has("allow-large-full-write"),
   };
 
   return { command, positional, options };
@@ -244,6 +251,7 @@ function printHelp() {
       `  --prewrite-max-inspect-rounds <n> Default: ${DEFAULT_PREWRITE_MAX_INSPECT_ROUNDS}`,
       `  --prevalidation-max-postwrite-rounds <n> Default: ${DEFAULT_PREVALIDATION_MAX_POSTWRITE_ROUNDS}`,
       "  --write-allow-regex <regex> Restrict write/replace paths (e.g. \"^src/|^scripts/\")",
+      "  --allow-large-full-write Allow write_file to overwrite large existing files (default: blocked)",
       "  --dry-run        Print request without sending",
     ].join("\n"),
   );
@@ -759,7 +767,8 @@ function toolsForOptions(options: CliOptions): ToolDefinition[] {
       type: "function",
       function: {
         name: "write_file",
-        description: "Write UTF-8 content to a file in workspace (overwrite).",
+        description:
+          "Create a new file or overwrite a small existing file. For large existing files, use replace_in_file instead (full overwrite may be blocked).",
         parameters: {
           type: "object",
           properties: {
@@ -774,7 +783,8 @@ function toolsForOptions(options: CliOptions): ToolDefinition[] {
       type: "function",
       function: {
         name: "replace_in_file",
-        description: "Replace one exact string in a UTF-8 file in workspace.",
+        description:
+          "Replace the first exact occurrence of old_string in a UTF-8 file. old_string must be unique in the file when possible to avoid wrong edits.",
         parameters: {
           type: "object",
           properties: {
@@ -879,8 +889,26 @@ async function readTextFileInWorkspace(inputPath: string): Promise<string> {
   return clipOutput(text);
 }
 
-async function writeTextFileInWorkspace(inputPath: string, content: string): Promise<string> {
+async function writeTextFileInWorkspace(
+  inputPath: string,
+  content: string,
+  options: CliOptions,
+): Promise<string> {
   const fullPath = resolveWorkspacePath(inputPath);
+  if (!options.allowLargeFullWrite) {
+    try {
+      const existing = await readFile(fullPath, "utf8");
+      if (existing.length > MAX_EXISTING_FILE_FULL_WRITE_CHARS) {
+        return (
+          `Refusing full overwrite: ${inputPath} already exists (${existing.length} chars, limit ${MAX_EXISTING_FILE_FULL_WRITE_CHARS}). ` +
+          "Use replace_in_file with a short unique old_string and new_string. " +
+          "If you truly need a full rewrite, re-run with flag --allow-large-full-write."
+        );
+      }
+    } catch {
+      // File does not exist: allow full write (new file).
+    }
+  }
   await mkdir(path.dirname(fullPath), { recursive: true });
   await writeFile(fullPath, content, "utf8");
   return `Wrote ${content.length} chars to ${inputPath}`;
@@ -979,7 +1007,7 @@ async function dispatchTool(
       return { name, output: "Error: missing 'path' argument." };
     }
     logStep(options, `tool:write_file start -> ${filePath}`);
-    const output = await writeTextFileInWorkspace(filePath, content);
+    const output = await writeTextFileInWorkspace(filePath, content, options);
     logStep(options, "tool:write_file done");
     return { name, output };
   }

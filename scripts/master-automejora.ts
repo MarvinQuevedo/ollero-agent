@@ -29,7 +29,7 @@ const DEFAULTS: Options = {
   model: "qwen3.5:9b",
   intervalMs: 1500,
   cycles: 0, // 0 = infinite
-  maxRounds: 6,
+  maxRounds: 10,
   keepRuns: 20,
   mode: "ask",
   taskId: "T01",
@@ -40,7 +40,8 @@ const DEFAULTS: Options = {
   requireWrite: true,
   requireValidation: "cargo check|cargo test",
   requireValidationSuccess: true,
-  writeAllowRegex: "^src/|^scripts/ollero-cli\\.ts$",
+  // Allow Rust sources and the two TS drivers (self-improve loop edits ollero-cli; master may edit itself).
+  writeAllowRegex: "^src/|^scripts/(ollero-cli|master-automejora)\\.ts$",
   prewriteMaxInspectRounds: 2,
   prevalidationMaxPostWriteRounds: 1,
 };
@@ -119,9 +120,10 @@ function buildCliArgs(options: Options): string[] {
   const strictContract = [
     "Mandatory execution contract:",
     "1) Perform at least one real write_file or replace_in_file operation.",
-    "2) The edited path must satisfy the allowed write regex.",
-    "3) Run validation command matching required regex (cargo check or cargo test).",
-    "4) If not completed, continue tool-calling and do not finalize with summaries.",
+    "2) For existing large files (e.g. scripts/ollero-cli.ts), use replace_in_file with a minimal unique old_string — do not paste the whole file into write_file.",
+    "3) The edited path must satisfy the allowed write regex.",
+    "4) Run validation command matching required regex (cargo check or cargo test).",
+    "5) If not completed, continue tool-calling and do not finalize with summaries.",
   ].join(" ");
   const askPromptWithContract =
     options.mode === "ask"
