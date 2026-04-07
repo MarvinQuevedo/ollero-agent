@@ -20,6 +20,7 @@ use crate::ollama::{
     client::OllamaClient,
     types::{ChatOptions, LlmResponse, Message, ToolCallItem},
 };
+use crate::compression::{self, CompressionLevel, CompressionMode};
 use crate::tools;
 
 const SYSTEM_PROMPT: &str = "\
@@ -114,6 +115,8 @@ pub struct Repl {
     /// Reset to true when `/model` changes.
     model_supports_tools: bool,
     verbose_tools: bool,
+    /// When to apply token compression: always, auto (at budget limit), or manual.
+    compression_mode: CompressionMode,
     input: InputReader,
     permissions: PermissionStore,
     /// ID of the current session file (if saved/resumed).
@@ -147,6 +150,12 @@ enum SlashAction {
     ListSessions,
     /// Resume a saved session by ID.
     ResumeSession(String),
+    /// Show current compression mode and stats.
+    CompressShow,
+    /// Set compression mode (always / auto / manual).
+    CompressSetMode(CompressionMode),
+    /// Manually trigger compression on current history now.
+    CompressNow,
 }
 
 /// `/tree`, `/tree src`, `/tree src 4`
@@ -190,6 +199,8 @@ impl Repl {
             &SessionMode::Agent,
             true,
         ))];
+        let compression_mode = CompressionMode::from_str_loose(&config.compression_mode)
+            .unwrap_or(CompressionMode::Auto);
         Self {
             client,
             history,
@@ -198,6 +209,7 @@ impl Repl {
             mode: SessionMode::Agent,
             model_supports_tools: true,
             verbose_tools: false,
+            compression_mode,
             input: InputReader::new(),
             permissions: PermissionStore::new(&workspace_root),
             session_id: None,
@@ -290,14 +302,18 @@ impl Repl {
 
     /// Evict old messages when history exceeds the context budget.
     ///
-    /// Strategy:
-    /// - Keep system prompt (index 0) always.
-    /// - Keep the last N messages in full (recent context).
-    /// - Summarize/evict oldest non-system messages when over budget.
+    /// Two-phase strategy:
+    /// 1. First pass: compress tool results and long messages in-place (lossless).
+    /// 2. If still over budget: evict oldest non-system messages, keeping a tail window.
     ///
     /// We estimate ~4 chars per token. With context_size tokens total,
     /// we reserve 25% for response, so budget = context_size * 3 chars.
     fn compact_history(&mut self) {
+        // In Manual mode, never auto-compress — user triggers via /compress now
+        if self.compression_mode == CompressionMode::Manual {
+            return;
+        }
+
         let budget_chars = (self.config.context_size as usize) * 3;
         let current = self.history_char_count();
 
@@ -305,43 +321,78 @@ impl Repl {
             return;
         }
 
-        // Keep system prompt (first) and at least the last 6 messages.
+        self.run_compression_pass();
+    }
+
+    /// Force-compress history: phase 1 compresses in-place, phase 2 evicts oldest.
+    /// Called automatically (Auto/Always modes) or manually via `/compress now`.
+    fn run_compression_pass(&mut self) -> (usize, usize) {
+        let budget_chars = (self.config.context_size as usize) * 3;
+        let before_total = self.history_char_count();
+
+        // ── Phase 1: Compress existing messages in-place ──────────────────
         let keep_tail = 6usize;
-        let min_keep = 1 + keep_tail; // system + tail
+        let compressible_end = self.history.len().saturating_sub(keep_tail);
+
+        let mut phase1_saved = 0usize;
+        for i in 1..compressible_end {
+            let msg = &self.history[i];
+            if msg.content.len() < 200 {
+                continue;
+            }
+            let original_len = msg.content.len();
+            let compressed = match msg.role.as_str() {
+                "tool" => {
+                    let tool_name = msg.tool_name.as_deref().unwrap_or("unknown");
+                    compression::compress_tool_output(tool_name, &msg.content, CompressionLevel::Aggressive).text
+                }
+                "assistant" | "user" => {
+                    compression::compress_message(&msg.content, CompressionLevel::Standard)
+                }
+                _ => continue,
+            };
+            if compressed.len() < original_len {
+                phase1_saved += original_len - compressed.len();
+                self.history[i].content = compressed;
+            }
+        }
+
+        // Re-check after compression
+        let current = self.history_char_count();
+        if current <= budget_chars {
+            return (before_total, self.history_char_count());
+        }
+
+        // ── Phase 2: Evict oldest non-system messages ─────────────────────
+        let min_keep = 1 + keep_tail;
 
         if self.history.len() <= min_keep {
-            return; // can't evict anything meaningful
+            return (before_total, self.history_char_count());
         }
 
-        // Evict oldest non-system messages until under budget.
-        // Replace evicted messages with a single summary marker.
         let evict_end = self.history.len().saturating_sub(keep_tail);
-        let mut evicted_count = 0usize;
-        let mut evicted_roles = Vec::new();
 
-        // Collect what we're evicting (indices 1..evict_end)
-        for msg in &self.history[1..evict_end] {
-            evicted_roles.push(msg.role.clone());
-            evicted_count += 1;
+        let evicted_info: Vec<(String, usize)> = self.history[1..evict_end]
+            .iter()
+            .map(|m| (m.role.clone(), m.content.len()))
+            .collect();
+
+        if evicted_info.is_empty() {
+            return (before_total, self.history_char_count());
         }
 
-        if evicted_count == 0 {
-            return;
-        }
-
-        // Replace evicted range with a single summary message
-        let summary = format!(
-            "[Context compressed: {evicted_count} earlier messages evicted to fit context window. \
-             The conversation continues from the most recent messages below.]"
-        );
+        let summary = compression::build_eviction_summary(&evicted_info);
 
         let mut new_history = Vec::with_capacity(1 + 1 + keep_tail);
         new_history.push(self.history[0].clone()); // system
         new_history.push(Message::system(summary));
         new_history.extend_from_slice(&self.history[evict_end..]);
         self.history = new_history;
+
+        (before_total, self.history_char_count())
     }
 
+    /// Force compression on all compressible messages (used by `/compress now`).
     fn chat_options(&self) -> ChatOptions {
         ChatOptions {
             temperature: None,
@@ -993,7 +1044,7 @@ impl Repl {
                 }
             }
 
-            let output = match tools::dispatch(name, args).await {
+            let raw_output = match tools::dispatch(name, args).await {
                 Ok(out) => {
                     if !is_bash && self.verbose_tools {
                         println!("{}", "✓".green());
@@ -1008,6 +1059,25 @@ impl Repl {
                 }
             };
 
+            // Compress tool output based on compression mode.
+            let output = if self.compression_mode == CompressionMode::Always {
+                let cr = compression::compress_tool_output(name, &raw_output, CompressionLevel::Standard);
+                if self.verbose_tools && cr.original_len > 200 && cr.compressed_len < cr.original_len {
+                    let saved = cr.original_len - cr.compressed_len;
+                    let pct = ((saved as f64 / cr.original_len as f64) * 100.0) as u32;
+                    if pct > 5 {
+                        println!(
+                            "      {} compressed: {} → {} chars (−{}%)",
+                            "↘".truecolor(100, 180, 255),
+                            cr.original_len, cr.compressed_len, pct
+                        );
+                    }
+                }
+                cr.text
+            } else {
+                // Auto and Manual: store raw output; compression happens later if needed
+                raw_output
+            };
             results.push(Message::tool_result(name.clone(), output));
         }
 
@@ -1240,6 +1310,56 @@ impl Repl {
                     Err(e) => eprintln!("{}", format!("Error loading session: {e}").red()),
                 }
             }
+            SlashAction::CompressShow => {
+                let total_chars = self.history_char_count();
+                let total_tokens = compression::estimate_tokens_from_chars(total_chars);
+                let budget_chars = (self.config.context_size as usize) * 3;
+                let usage_pct = if budget_chars > 0 {
+                    (total_chars as f64 / budget_chars as f64) * 100.0
+                } else {
+                    0.0
+                };
+                println!("  {} {}", "Compression mode:".bold(), self.compression_mode.label().cyan().bold());
+                println!("  {} {}", "Description:".bold(), self.compression_mode.description().dimmed());
+                println!(
+                    "  {} {} msgs, {} chars (~{} tokens), {:.1}% of budget",
+                    "History:".bold(),
+                    self.history.len(),
+                    total_chars,
+                    total_tokens,
+                    usage_pct
+                );
+            }
+            SlashAction::CompressSetMode(new_mode) => {
+                self.compression_mode = new_mode;
+                self.config.compression_mode = new_mode.label().to_string();
+                if let Err(e) = self.config.save() {
+                    eprintln!("{}", format!("Mode updated for session but config save failed: {e}").yellow());
+                } else {
+                    println!(
+                        "  {} {} — {}",
+                        "Compression mode:".bold(),
+                        new_mode.label().cyan().bold(),
+                        new_mode.description().dimmed()
+                    );
+                }
+            }
+            SlashAction::CompressNow => {
+                let (before_chars, after_chars) = self.run_compression_pass();
+                let saved = before_chars.saturating_sub(after_chars);
+                if saved > 0 {
+                    println!(
+                        "  {} Compressed: {} → {} chars (−{} chars, ~{} tokens freed)",
+                        "\u{2713}".green(),
+                        before_chars,
+                        after_chars,
+                        saved,
+                        saved / 4
+                    );
+                } else {
+                    println!("{}", "  Nothing to compress — history is already compact.".dimmed());
+                }
+            }
         }
     }
 
@@ -1267,6 +1387,11 @@ impl Repl {
                  /read <path>       — read a file and add it to context (works without tool models)\n\
                  /glob <pat> [dir]  — list matching paths, add to context\n\
                  /tree [path] [n]   — directory tree (default . depth 3), add to context\n\
+                 /compress          — show compression mode and context stats\n\
+                 /compress always   — compress all tool outputs immediately\n\
+                 /compress auto     — compress only when approaching context limit (default)\n\
+                 /compress manual   — no auto-compression; use '/compress now' to trigger\n\
+                 /compress now      — manually compress history right now\n\
                  (Broad \u{201c}read project / status\u{201d} questions auto-attach tree + key files when tools are off.)\n\
                  Chat / no tools: ```bash blocks — run offers; ```lang path/file.md — save uses path (confirm Y/n).\n\
                  Ctrl+C             — clear the current input line"
@@ -1339,6 +1464,19 @@ impl Repl {
                 }
             }
             "/verbose" => Some(SlashAction::ToggleVerboseTools),
+            "/compress" => Some(SlashAction::CompressShow),
+            s if s.starts_with("/compress ") => {
+                let rest = s.trim_start_matches("/compress ").trim();
+                match rest {
+                    "now" => Some(SlashAction::CompressNow),
+                    other => match CompressionMode::from_str_loose(other) {
+                        Some(mode) => Some(SlashAction::CompressSetMode(mode)),
+                        None => Some(SlashAction::Print(
+                            format!("Unknown compression mode '{other}'. Valid: always, auto, manual, now"),
+                        )),
+                    },
+                }
+            }
             "/save" => Some(SlashAction::SaveSession),
             "/sessions" => Some(SlashAction::ListSessions),
             "/resume" => Some(SlashAction::Print("Usage: /resume <session-id>".into())),

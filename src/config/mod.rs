@@ -17,6 +17,13 @@ pub struct Config {
     pub ollama_url: String,
     pub model: String,
     pub context_size: u32,
+    /// Token compression mode: "always", "auto", or "manual".
+    #[serde(default = "default_compression_mode")]
+    pub compression_mode: String,
+}
+
+fn default_compression_mode() -> String {
+    "auto".to_string()
 }
 
 impl Default for Config {
@@ -27,6 +34,7 @@ impl Default for Config {
             // Must support tool calling in Ollama.
             model: "llama3.2".into(),
             context_size: 8192,
+            compression_mode: default_compression_mode(),
         }
     }
 }
@@ -103,6 +111,7 @@ mod tests {
             ollama_url: "http://localhost:11434".into(),
             model: "test-model:7b".into(),
             context_size: 4096,
+            compression_mode: "always".into(),
         };
         original.save_to(&path).unwrap();
 
@@ -111,6 +120,7 @@ mod tests {
         assert_eq!(loaded.ollama_url, original.ollama_url);
         assert_eq!(loaded.model, original.model);
         assert_eq!(loaded.context_size, original.context_size);
+        assert_eq!(loaded.compression_mode, original.compression_mode);
 
         std::fs::remove_file(&path).unwrap();
     }

@@ -83,6 +83,7 @@ pub async fn run_wizard() -> Result<Config> {
         ollama_url,
         model,
         context_size: 8192,
+        compression_mode: "auto".to_string(),
     };
     config.save()?;
 

@@ -2,6 +2,7 @@
 //!
 //! This binary provides the command-line interface for the Allux tool.
 
+mod compression;
 mod config;
 mod input;
 mod ollama;
