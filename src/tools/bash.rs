@@ -62,7 +62,12 @@ pub async fn run_bash(command: &str) -> Result<String> {
         loop {
             tokio::select! {
                 Some((is_err, line)) = rx.recv() => {
-                    let display_line = if line.len() > 60 { format!("{}…", &line[..59]) } else { line.clone() };
+                    let display_line = if line.chars().count() > 60 {
+                        let truncated: String = line.chars().take(59).collect();
+                        format!("{truncated}…")
+                    } else {
+                        line.clone()
+                    };
                     spinner.set_message(format!("{}\n    {} {}", initial_msg, "│".truecolor(60, 60, 70), display_line.truecolor(120, 120, 130)));
                     
                     if is_err {

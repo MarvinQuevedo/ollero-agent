@@ -40,12 +40,12 @@ fn style_text(
         return match level {
             HeadingLevel::H1 => format!(
                 "{} {}",
-                "▌".truecolor(217, 119, 38),
+                "▌".truecolor(100, 149, 237),
                 s.truecolor(255, 255, 255).bold()
             ),
             HeadingLevel::H2 => format!(
                 "{} {}",
-                "▎".truecolor(217, 119, 38),
+                "▎".truecolor(100, 149, 237),
                 s.cyan().bold()
             ),
             _ => s.bold().to_string(),
@@ -332,7 +332,7 @@ pub fn to_terminal(src: &str) -> String {
 
             Event::Rule => {
                 ensure_blank_line(&mut out);
-                out.push_str(&format!("{}\n", "─".repeat(40).truecolor(80, 60, 40)));
+                out.push_str(&format!("{}\n", "─".repeat(40).truecolor(50, 60, 80)));
             }
 
             Event::TaskListMarker(checked) => {

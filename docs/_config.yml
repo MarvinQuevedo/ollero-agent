@@ -31,7 +31,7 @@ search:
 
 color_scheme: dark
 
-footer_content: "Allux is open source under GPL-3.0. <a href='https://github.com/MarvinQuevedo/allux-agent'>GitHub →</a>"
+footer_content: "Allux is open-source under GPL-3.0. <a href='https://github.com/MarvinQuevedo/allux-agent'>GitHub →</a>"
 
 # Back to top
 back_to_top: true

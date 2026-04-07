@@ -74,14 +74,57 @@ impl SessionMode {
     }
 }
 
-/// Spinner on stderr while the model has not emitted visible text yet.
+/// Extract a human-readable detail from a tool call's arguments.
+/// e.g. `read_file {"path":"src/main.rs"}` → `src/main.rs`
+fn tool_call_detail(name: &str, args: &serde_json::Value) -> String {
+    let s = |key: &str| args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string());
+    match name {
+        "read_file" | "write_file" => s("path").unwrap_or_default(),
+        "edit_file" => s("path").unwrap_or_default(),
+        "bash" => {
+            let cmd = s("command").unwrap_or_default();
+            if cmd.len() > 60 {
+                format!("{}…", &cmd[..59])
+            } else {
+                cmd
+            }
+        }
+        "grep" => {
+            let pattern = s("pattern").unwrap_or_default();
+            let dir = s("path").unwrap_or_default();
+            if dir.is_empty() { pattern } else { format!("{pattern} in {dir}") }
+        }
+        "glob" => s("pattern").unwrap_or_default(),
+        "tree" => s("path").unwrap_or_else(|| ".".to_string()),
+        _ => String::new(),
+    }
+}
+
+/// Spinner on stdout while the model has not emitted visible text yet.
+///
+/// Renders immediately (no initial delay) so the user always sees feedback.
 fn spawn_thinking_spinner(active: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        const FRAMES: &[char] = &['\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}', '\u{2807}', '\u{280F}'];
+        const FRAMES: &[char] = &[
+            '\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}',
+            '\u{2834}', '\u{2826}', '\u{2827}', '\u{2807}', '\u{280F}',
+        ];
+        let mut stdout = io::stdout();
         let mut i = 0usize;
+
+        // Render the first frame immediately (no tick delay).
+        if active.load(Ordering::Relaxed) {
+            let c = FRAMES[0];
+            let spin_char = format!("{c}").truecolor(100, 149, 237);
+            let label = "Thinking\u{2026}".truecolor(70, 110, 180).dimmed();
+            let _ = write!(stdout, "\r\x1b[K  {spin_char}  {label}");
+            let _ = stdout.flush();
+            i = 1;
+        }
+
         let mut tick = tokio::time::interval(Duration::from_millis(80));
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let mut stderr = io::stderr();
+
         while active.load(Ordering::Relaxed) {
             tick.tick().await;
             if !active.load(Ordering::Relaxed) {
@@ -89,13 +132,14 @@ fn spawn_thinking_spinner(active: Arc<AtomicBool>) -> tokio::task::JoinHandle<()
             }
             let c = FRAMES[i % FRAMES.len()];
             i += 1;
-            let spin_char = format!("{}", c).truecolor(217, 119, 38);
-            let label = "Thinking\u{2026}".truecolor(180, 100, 45).dimmed();
-            let _ = write!(stderr, "\r\x1b[K  {spin_char}  {label}");
-            let _ = stderr.flush();
+            let spin_char = format!("{c}").truecolor(100, 149, 237);
+            let label = "Thinking\u{2026}".truecolor(70, 110, 180).dimmed();
+            let _ = write!(stdout, "\r\x1b[K  {spin_char}  {label}");
+            let _ = stdout.flush();
         }
-        let _ = write!(stderr, "\r\x1b[K");
-        let _ = stderr.flush();
+        // Clear the spinner line.
+        let _ = write!(stdout, "\r\x1b[K");
+        let _ = stdout.flush();
     })
 }
 
@@ -300,6 +344,22 @@ impl Repl {
     /// Estimate total characters in conversation history.
     fn history_char_count(&self) -> usize {
         self.history.iter().map(|m| m.content.len()).sum()
+    }
+
+    /// Build ContextInfo for the current state.
+    fn context_info(&self) -> banner::ContextInfo<'_> {
+        banner::ContextInfo {
+            used_chars: self.history_char_count(),
+            budget_chars: (self.config.context_size as usize) * 3,
+            context_size: self.config.context_size,
+            model: &self.client.model,
+        }
+    }
+
+    /// Render a divider that includes context usage info.
+    fn context_divider(&self) -> String {
+        let ctx = self.context_info();
+        banner::divider_with_context(&ctx)
     }
 
     /// Evict old messages when history exceeds the context budget.
@@ -529,7 +589,7 @@ impl Repl {
         );
 
         loop {
-            println!("{}", banner::divider());
+            println!("{}", self.context_divider());
             let prompt = banner::accent("❯").bold().to_string();
             let input = match self.input.read_line(&prompt, 1, Some(banner::INPUT_FOOTER)) {
                 Ok(Some(s)) if !s.is_empty() => s,
@@ -594,9 +654,6 @@ impl Repl {
             // Compact history if approaching context window limit
             self.compact_history();
 
-            print!("{}", banner::response_prefix());
-            let _ = stdout.flush();
-
             let mut streamed_text = String::new();
             let options = self.chat_options();
 
@@ -606,6 +663,7 @@ impl Repl {
 
             let tools_arg: Option<&[_]> = if use_tools { Some(&tools) } else { None };
 
+            // Show spinner while waiting — prints immediately so user never sees a "stuck" screen.
             let spin_active = Arc::new(AtomicBool::new(true));
             let spin_on_text = spin_active.clone();
             let spinner = spawn_thinking_spinner(spin_active.clone());
@@ -626,6 +684,10 @@ impl Repl {
             };
 
             finish_thinking_spinner(&spin_active, spinner).await;
+
+            // Print the response prefix after spinner clears, so it's always visible.
+            print!("{}", banner::response_prefix());
+            let _ = stdout.flush();
 
             // ── Auto-fallback: model doesn't support tools ───────────────────
             if let Err(ref e) = result {
@@ -694,20 +756,32 @@ impl Repl {
                             println!();
                         }
                     }
-                    banner::print_token_usage(&stats);
                     self.history.push(Message::assistant(&content));
+                    banner::print_token_usage(&stats);
                     return;
                 }
 
                 Ok(LlmResponse::ToolCalls { calls, stats }) => {
                     println!();
                     if !calls.is_empty() {
-                        let tool_names: Vec<&str> = calls.iter().map(|c| c.function.name.as_str()).collect();
-                        println!(
-                            "  {} {}",
-                            "⚡".truecolor(217, 119, 38),
-                            format!("{}", tool_names.join(" → ")).truecolor(140, 140, 160)
-                        );
+                        for call in &calls {
+                            let name = &call.function.name;
+                            let detail = tool_call_detail(name, &call.function.arguments);
+                            if detail.is_empty() {
+                                println!(
+                                    "  {} {}",
+                                    "⚡".truecolor(100, 149, 237),
+                                    name.truecolor(140, 140, 160)
+                                );
+                            } else {
+                                println!(
+                                    "  {} {} {}",
+                                    "⚡".truecolor(100, 149, 237),
+                                    name.truecolor(140, 140, 160),
+                                    detail.truecolor(100, 100, 120)
+                                );
+                            }
+                        }
                         banner::print_token_usage(&stats);
                     }
                     self.history.push(Message::assistant_tool_calls(calls.clone()));
@@ -1440,7 +1514,7 @@ impl Repl {
                 }
                 println!(
                     "  {} Summarizing {} messages via {}…",
-                    "⚡".truecolor(217, 119, 38),
+                    "⚡".truecolor(100, 149, 237),
                     msg_count - 7, // subtract system + keep_tail
                     self.client.model.cyan()
                 );

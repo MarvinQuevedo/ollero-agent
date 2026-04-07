@@ -6,13 +6,13 @@ use colored::Colorize;
 
 use crate::ollama::types::ResponseStats;
 
-/// Orange accent colour used throughout the UI.
+/// Blue accent colour used throughout the UI — legible on dark and light backgrounds.
 pub fn accent(s: &str) -> colored::ColoredString {
-    s.truecolor(217, 119, 38)
+    s.truecolor(100, 149, 237)
 }
 
 pub fn accent_dim(s: &str) -> colored::ColoredString {
-    s.truecolor(180, 100, 45).dimmed()
+    s.truecolor(70, 110, 180).dimmed()
 }
 
 /// Shown above `>` while editing.
@@ -66,7 +66,7 @@ const LOGO: [&str; 5] = [
     "██    ██ ████████ ████████  ██████  ██    ██",
 ];
 
-/// El Salvador flag gradient — azul ↔ blanco ↔ azul, brightened for dark terminals.
+/// Blue ↔ white ↔ blue gradient for the logo.
 const LOGO_COLORS: [(u8, u8, u8); 5] = [
     ( 80, 140, 240), // azul brillante (franja superior)
     (120, 170, 240), // transición azul → blanco
@@ -91,9 +91,9 @@ pub fn print_welcome(version: &str, model: &str, workspace: &Path, skills: &[Str
     // Subtitle line
     println!(
         "  {}  {}  {}  {}",
-        format!("v{version}").truecolor(217, 119, 38).bold(),
-        "·".truecolor(80, 60, 40),
-        model.cyan(),
+        format!("v{version}").truecolor(100, 149, 237).bold(),
+        "·".truecolor(50, 60, 80),
+        model.truecolor(100, 180, 255),
         format!("· {cwd}").truecolor(100, 100, 120)
     );
 
@@ -127,9 +127,9 @@ pub fn print_welcome(version: &str, model: &str, workspace: &Path, skills: &[Str
     println!(
         "  {}  {}  {}  {}  {}",
         bar,
-        "/help".truecolor(217, 119, 38),
-        "/model".truecolor(217, 119, 38),
-        "/mode".truecolor(217, 119, 38),
+        "/help".truecolor(100, 149, 237),
+        "/model".truecolor(100, 149, 237),
+        "/mode".truecolor(100, 149, 237),
         "Ctrl+D exit".truecolor(100, 100, 120)
     );
     println!("  {}", "╰──────────────────────────────────────────────────────────╯".truecolor(60, 60, 70));
@@ -223,11 +223,11 @@ pub fn print_permission_bash(command: &str) {
     println!("{}", box_empty());
     println!("{}", box_separator());
     let family = command.split_whitespace().next().unwrap_or("this");
-    println!("{}", box_line(&format!("{}  Allow this once", "[y]".cyan().bold())));
-    println!("{}", box_line(&format!("{}  Allow for this session", "[s]".cyan().bold())));
-    println!("{}", box_line(&format!("{}  Allow all {family} commands (session)", "[a]".cyan().bold())));
-    println!("{}", box_line(&format!("{}  Allow {family} in this workspace (saved)", "[w]".truecolor(217, 119, 38).bold())));
-    println!("{}", box_line(&format!("{}  Allow {family} globally (saved)", "[g]".truecolor(217, 119, 38).bold())));
+    println!("{}", box_line(&format!("{}  Allow this once", "[y]".truecolor(100, 149, 237).bold())));
+    println!("{}", box_line(&format!("{}  Allow for this session", "[s]".truecolor(100, 149, 237).bold())));
+    println!("{}", box_line(&format!("{}  Allow all {family} commands (session)", "[a]".truecolor(100, 149, 237).bold())));
+    println!("{}", box_line(&format!("{}  Allow {family} in this workspace (saved)", "[w]".truecolor(80, 140, 240).bold())));
+    println!("{}", box_line(&format!("{}  Allow {family} globally (saved)", "[g]".truecolor(80, 140, 240).bold())));
     println!("{}", box_line(&format!("{}  Reject", "[n]".red().bold())));
     println!("{}", box_bottom());
 }
@@ -239,7 +239,7 @@ pub fn print_permission_edit(path: &str, old: &str, new: &str) {
     println!("{}", box_line(&format!(
         "{}  {}",
         "Allux wants to edit:".bold(),
-        path.cyan().bold()
+        path.truecolor(100, 149, 237).bold()
     )));
     println!("{}", box_empty());
 
@@ -268,17 +268,97 @@ pub fn print_permission_edit(path: &str, old: &str, new: &str) {
 
     println!("{}", box_empty());
     println!("{}", box_separator());
-    println!("{}", box_line(&format!("{}  Allow this edit", "[y]".cyan().bold())));
+    println!("{}", box_line(&format!("{}  Allow this edit", "[y]".truecolor(100, 149, 237).bold())));
     println!("{}", box_line(&format!("{}  Reject", "[n]".red().bold())));
     println!("{}", box_bottom());
 }
 
-/// Horizontal divider used between conversation turns.
-pub fn divider() -> String {
+/// Context usage info for the status bar.
+pub struct ContextInfo<'a> {
+    pub used_chars: usize,
+    pub budget_chars: usize,
+    pub context_size: u32,
+    pub model: &'a str,
+}
+
+/// Horizontal divider with context status bar between conversation turns.
+pub fn divider_with_context(ctx: &ContextInfo) -> String {
+    let used_tokens = (ctx.used_chars + 3) / 4;
+    let total_tokens = ctx.context_size as usize;
+    let pct = if ctx.budget_chars > 0 {
+        ((ctx.used_chars as f64 / ctx.budget_chars as f64) * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+
+    // ── Progress bar ──
+    let bar_width = 20usize;
+    let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
+    let empty = bar_width.saturating_sub(filled);
+
+    // Color the bar based on usage
+    let (fr, fg, fb) = if pct < 50.0 {
+        (80, 160, 200)  // blue-green
+    } else if pct < 75.0 {
+        (220, 180, 60)  // yellow
+    } else if pct < 90.0 {
+        (220, 130, 50)  // orange
+    } else {
+        (220, 70, 70)   // red
+    };
+
+    let bar_filled = "█".repeat(filled).truecolor(fr, fg, fb);
+    let bar_empty = "░".repeat(empty).truecolor(60, 60, 70);
+
+    // Compact token display
+    let used_display = fmt_k_tokens(used_tokens);
+    let total_display = fmt_k_tokens(total_tokens);
+
+    // Model name (truncate if too long)
+    let model_short = if ctx.model.len() > 16 {
+        &ctx.model[..16]
+    } else {
+        ctx.model
+    };
+
+    let pct_display = format!("{pct:.0}%");
+    let (pr, pg, pb) = if pct < 50.0 {
+        (100, 170, 210)
+    } else if pct < 75.0 {
+        (220, 180, 60)
+    } else if pct < 90.0 {
+        (220, 130, 50)
+    } else {
+        (220, 70, 70)
+    };
+
     format!(
-        "  {}",
-        "─".repeat(60).truecolor(80, 60, 40)
+        "  {} {} {}{} {} {} {} {}",
+        "──".truecolor(50, 60, 80),
+        model_short.truecolor(140, 140, 160),
+        bar_filled,
+        bar_empty,
+        format!("{used_display}/{total_display}").truecolor(140, 140, 160),
+        pct_display.truecolor(pr, pg, pb),
+        "─".repeat(calc_pad(model_short, &used_display, &total_display, &pct_display, bar_width)).truecolor(50, 60, 80),
+        "──".truecolor(50, 60, 80),
     )
+}
+
+/// Format token count as compact "1.2k" or "512".
+fn fmt_k_tokens(n: usize) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{n}")
+    }
+}
+
+/// Calculate remaining pad to fill ~60 chars.
+fn calc_pad(model: &str, used: &str, total: &str, pct: &str, bar_w: usize) -> usize {
+    // "  ── model ████░░░░ used/total pct ────── ──"
+    let content_len = 5 + model.len() + 1 + bar_w + 1 + used.len() + 1 + total.len() + 1 + pct.len() + 1 + 2;
+    60usize.saturating_sub(content_len)
 }
 
 /// Prefix for assistant responses.

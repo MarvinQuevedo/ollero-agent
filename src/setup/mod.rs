@@ -122,7 +122,7 @@ fn print_banner() {
     }
     println!();
     println!("  {}", "Local code agent powered by Ollama".bold());
-    println!("  {}", "─────────────────────────────────────────────".truecolor(217, 119, 38));
+    println!("  {}", "─────────────────────────────────────────────".truecolor(100, 149, 237));
     println!();
     println!("  {}", "Welcome! First-time setup — takes 30 seconds.".bold());
     println!();
