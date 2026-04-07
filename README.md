@@ -1,162 +1,164 @@
-# Allux — Local Code Agent powered by Ollama
+# Allux Agent 🚀
 
-> *"Your local code craftsman, shaped by Ollama"*
+> **Note:** This README and parts of this project were created by **Allux**, an AI agent, using the **Allux** tool itself.
 
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL%203.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Language-Rust-orange.svg)](https://www.rust-lang.org/)
-[![Ollama](https://img.shields.io/badge/Backend-Ollama-black.svg)](https://ollama.com/)
-[![Status](https://img.shields.io/badge/Status-Active%20Development-green.svg)]()
-
-**Allux** is an interactive terminal-based development agent written in Rust. It uses local LLMs via [Ollama](https://ollama.com/) to assist with software engineering tasks — 100% on your machine, no cloud, no API keys.
+## 🚀 Introduction
+Allux is a local code agent built with Rust, designed to assist in software development tasks by integrating with Ollama. This project combines asynchronous processing, file manipulation, and modular extensibility to offer an efficient and powerful development experience.
 
 ---
 
-## Why "Allux"?
-
-An **allux** is a Spanish word for a craftsman who shapes pottery with their own hands — working locally, with their own materials, no external dependencies. Just like this agent: it runs entirely on your machine using local models via Ollama. The name also has a natural phonetic link with "Ollama" (All-ux / Oll-ama), reinforcing the local inference connection.
-
----
-
-## ✨ Features
-
-| Feature | Status |
-|---|---|
-| 🧠 **Intelligent Context Management** — smart token budgeting for local models | ✅ |
-| 🛠 **Tool System** — read, edit, grep, bash, glob, tree | ✅ |
-| 🔒 **Permission & Security System** — 4-scope grant model (once/session/workspace/global) | ✅ |
-| 📡 **Ollama Integration** — streaming HTTP, tool calling, multi-step reasoning | ✅ |
-| 💬 **Interactive REPL** — colored terminal with markdown rendering | ✅ |
-| 🔎 **Web Search & Fetch** — internet access for current docs | 🚧 |
-| 📋 **Session Persistence** — resume conversations across restarts | 🚧 |
-| ↩️ **Diff Rendering & Undo** — see exactly what changed, revert instantly | 🚧 |
-| ⚙️ **Slash Commands** — `/model`, `/undo`, `/sessions`, `/clear` | 🚧 |
-| 🔌 **MCP Protocol Support** — external tool servers | 📋 |
+## 📋 Table of Contents
+1. [📌 Overview](#overview)
+2. [🔧 Architecture and Technologies](#architecture-and-technologies)
+3. [📂 Project Structure](#project-structure)
+4. [🛠 Tools and Dependencies](#tools-and-dependencies)
+5. [🚀 Installation and Setup](#installation-and-setup)
+6. [🧪 Basic Usage](#basic-usage)
+7. [🔧 Extensibility with Skills](#extensibility-with-skills)
+8. [📝 Contributions](#contributions)
+9. [📄 Additional Documentation](#additional-documentation)
+10. [📋 Licenses](#licenses)
 
 ---
 
-## 🚀 Quick Start
+## 📌 Overview
+Allux is built on:
+- **Tokio** for asynchronous operations.
+- **Rust** for performance and security.
+- **Ollama** for language model integration.
 
-### Prerequisites
-
-- [Rust toolchain](https://rustup.rs/) (stable)
-- [Ollama](https://ollama.com/) running locally
-
-### Installation
-
-```bash
-# Clone the repo
-git clone https://github.com/MarvinQuevedo/allux-agent.git
-cd allux-agent
-
-# Pull a recommended model
-ollama pull qwen2.5-coder:14b
-
-# Build
-cargo build --release
-
-# Run
-./target/release/allux
-```
-
-### First Run
-
-On first launch, Allux runs an interactive setup wizard to configure:
-- Your preferred Ollama model
-- Permission mode (`balanced`, `paranoid`, or `yolo`)
-- Project-level settings (optional `.allux.toml`)
+The project allows exploring, modifying, and executing code locally with advanced file processing and pattern matching capabilities.
 
 ---
 
-## 📖 Documentation
+## 🔧 Architecture and Technologies
 
-Full documentation is available in the [`docs/`](docs/) folder and as [GitHub Pages](https://marvinquevedo.github.io/allux-agent/).
+### 🔄 Architecture
+- **Modular**: Each functionality is encapsulated in independent modules.
+- **Asynchronous**: Designed to handle multiple tasks simultaneously.
+- **Extensible**: Skill system for adding specific functionalities.
 
-| Document | Description |
-|---|---|
-| [Architecture](docs/architecture/overview.md) | System design, component map, conversation flow |
-| [Context Management](docs/architecture/context-management.md) | Token budgeting, smart truncation, history compression |
-| [Tool System](docs/architecture/tools.md) | Tool inventory, protocol, implementations |
-| [Permission System](docs/architecture/permissions.md) | 4-scope model, UX, hardcoded safety rules |
-| [Ollama Integration](docs/architecture/ollama.md) | HTTP streaming, tool calling protocol |
-| [Configuration](docs/guides/configuration.md) | `.allux.toml` reference |
-| [CLI Usage](docs/guides/cli-usage.md) | Commands, flags, examples |
-| [Development Tasks](docs/dev/tasks.md) | Iteration workflow & task queue |
-| [Feature Justification](docs/dev/justification.md) | Why each feature exists, AI vs pure software |
+### 🛠 Key Technologies
+| Technology      | Purpose                                                                 |
+|-----------------|-------------------------------------------------------------------------|
+| Rust            | Main language for performance and security.                             |
+| Tokio           | Asynchronous runtime for I/O handling.                                  |
+| Reqwest         | HTTP client with streaming support.                                     |
+| Serde           | JSON serialization/deserialization.                                     |
+| Crossterm       | Terminal input/output handling.                                         |
+| Glob            | File pattern searching.                                                 |
+| Regex           | Text pattern processing.                                                |
+| Pulldown-cmark  | Markdown processing.                                                    |
+| Indicatif       | Progress bars and load indicators.                                      |
 
 ---
 
-## 🏗 Project Structure
-
+## 📂 Project Structure
 ```
 allux-agent/
-├── src/
-│   ├── main.rs          # Binary entry point
-│   ├── config/          # Config loading (.allux.toml, global config)
-│   ├── input/           # Terminal input handling (keyboard, raw mode)
-│   ├── ollama/          # Ollama HTTP client & types
-│   ├── permissions/     # Permission guard & grant system
-│   ├── repl/            # Interactive REPL (TUI, markdown, banner)
-│   ├── setup/           # First-run wizard
-│   ├── tools/           # Tool implementations (bash, grep, read, edit…)
-│   └── workspace/       # Project detection & workspace management
-├── scripts/             # TypeScript automation & task runner
-├── docs/                # Documentation (GitHub Pages)
-├── validation/          # Manual validation suite
-├── Cargo.toml           # Rust dependencies
-└── .allux.toml          # (optional) Project-level config
+├── Cargo.toml          # Project dependencies and configuration.
+├── README.md           # Main documentation.
+├── LICENSE             # Project license.
+├── docs/               # Technical documentation and guides.
+├── scripts/            # Utility scripts.
+├── src/                # Main source code.
+│   ├── main.rs         # Program entry and REPL.
+│   ├── ollama/         # Ollama client and types.
+│   ├── tools/          # Built-in tools (bash, grep, edit, etc.).
+│   └── ...             # Other modules (config, session, etc.).
+├── tests/              # Integration and unit tests.
+├── validation/         # Test prompts and validation data.
+└── skills-lock.json    # Skills dependencies.
 ```
 
 ---
 
-## ⚙️ Configuration
+## 🛠 Tools and Dependencies
 
-Create `.allux.toml` in your project root:
-
-```toml
-[context]
-always_include = ["src/types.rs", "docs/ARCHITECTURE.md"]
-never_include  = ["*.lock", "*.min.js", "dist/**"]
-
-[instructions]
-system = """
-This project uses hexagonal architecture.
-Tests go in _test.rs files next to the module.
-Prefer Result<T, anyhow::Error> over unwrap().
-"""
-
-[model]
-default = "qwen2.5-coder:14b"
-max_context_tokens = 8192
-
-[permissions]
-mode = "balanced"  # "paranoid" | "balanced" | "yolo"
-```
+### 📦 Main Dependencies
+| Dependency   | Version | Purpose                                  |
+|--------------|---------|------------------------------------------|
+| reqwest      | 0.12    | HTTP client with streaming.              |
+| tokio        | 1.0     | Asynchronous runtime.                    |
+| serde        | 1.0     | JSON serialization.                     |
+| crossterm    | 0.28    | Terminal input/output.                  |
+| glob         | 0.3     | File searching.                         |
+| regex        | 1.0     | Pattern processing.                     |
+| pulldown-cmark| 0.12    | Markdown processing.                    |
+| indicatif    | 0.17    | Progress bars.                          |
 
 ---
 
-## 🔐 Permission Model
+## 🚀 Installation and Setup
 
-Allux never runs anything without your approval. When it wants to execute a command or edit a file, you choose how long the permission lasts:
+### 📦 Prerequisites
+1. **Rust**: Install Rust toolchain from [rustup.rs](https://rustup.rs).
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
 
-| Scope | Duration |
-|---|---|
-| **Once** | Just this single action |
-| **Session** | Until you quit Allux |
-| **Workspace** | Saved to `.allux/permissions.json` for this project |
-| **Global** | Saved to `~/.config/allux/permissions.json` for all projects |
+2. **Ollama**: Install Ollama for language model integration.
+   ```bash
+   curl -fsSL https://ollama.com/install.sh | sh
+   ```
 
-Some actions (e.g. `rm -rf`, force push) are **hardcoded denies** — they can never be approved, regardless of mode.
+### 🛠 Project Setup
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/usuario/allux-agent.git
+   cd allux-agent
+   ```
+
+2. Build the project:
+   ```bash
+   cargo build
+   ```
+
+3. Run the agent:
+   ```bash
+   cargo run --bin allux
+   ```
 
 ---
 
-## 🤝 Contributing
+## 🧪 Basic Usage
 
-This is an active personal project. Issues and PRs are welcome.
-
-See [Contributing Guide](docs/CONTRIBUTING.md) for code style, architecture guidelines, and development workflow.
+### 📌 Main Capabilities
+| Command/Tool       | Description                                  |
+|-----------------------|----------------------------------------------|
+| `bash`                | Execute shell commands.                      |
+| `grep <pattern>`      | Search patterns in files.                  |
+| `read_file <path>`    | Read file contents.                         |
+| `write_file <path>`   | Write/Overwrite files.                      |
+| `edit_file <path>`    | Edit specific strings in files.             |
+| `tree <path>`         | Display directory structure.                |
 
 ---
 
-## 📄 License
+## 🔧 Extensibility with Skills
+Allux allows adding specific functionalities using the skill system. Each skill is an independent module that can add new capabilities to the agent.
 
-GPL-3.0-or-later — see [LICENSE](LICENSE).
+### 📦 Installing Skills
+1. **Install a skill**:
+   ```bash
+   npx --yes skills add <owner/repo> --skill <name> -y
+   ```
+
+---
+
+## 📝 Contributions
+1. **Clone the repository**.
+2. **Create a branch** for your feature.
+3. **Write tests** to ensure stability.
+4. **Submit a Pull Request**.
+
+---
+
+## 📄 Additional Documentation
+- **[Architecture Docs](docs/architecture/overview.md)**: Detailed technical design.
+- **[Guides](docs/guides/index.md)**: How to use and configure Allux.
+
+---
+
+## 📋 Licenses
+This project is licensed under the [GPL-3.0-or-later](LICENSE).
