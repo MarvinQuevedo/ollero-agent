@@ -100,7 +100,32 @@ impl<'a> Widget for StatusBar<'a> {
             Span::styled(phase_str, Style::default().fg(Color::Rgb(220, 180, 60))),
         ];
 
-        let line = Line::from(spans);
+        // Append status message or scroll hints on the right
+        let mut right_spans: Vec<Span> = Vec::new();
+        if let Some(ref msg) = self.app.status_message {
+            right_spans.push(Span::styled(" \u{2502} ", sep));
+            right_spans.push(Span::styled(
+                msg.clone(),
+                Style::default().fg(Color::Rgb(220, 180, 60)),
+            ));
+        } else if !self.app.auto_scroll && self.app.scroll_offset > 0 {
+            right_spans.push(Span::styled(" \u{2502} ", sep));
+            right_spans.push(Span::styled(
+                format!("\u{2191}{}lines", self.app.scroll_offset),
+                Style::default().fg(Color::Rgb(180, 140, 60)),
+            ));
+        } else {
+            right_spans.push(Span::styled(" \u{2502} ", sep));
+            right_spans.push(Span::styled(
+                "drag=copy Esc=cancel",
+                Style::default().fg(Color::Rgb(70, 70, 90)),
+            ));
+        }
+
+        let mut all_spans = spans;
+        all_spans.extend(right_spans);
+
+        let line = Line::from(all_spans);
         let bg_style = Style::default().bg(Color::Rgb(20, 22, 30));
 
         // Fill background

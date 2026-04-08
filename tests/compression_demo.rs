@@ -141,12 +141,19 @@ fn smart_truncate(text: &str, max_chars: usize) -> String {
     let head_budget = (max_chars * 60) / 100;
     let tail_budget = max_chars - head_budget - 80;
 
-    let head_end = text[..head_budget.min(text.len())]
+    let mut hb = head_budget.min(text.len());
+    while hb > 0 && !text.is_char_boundary(hb) {
+        hb -= 1;
+    }
+    let head_end = text[..hb]
         .rfind('\n')
-        .unwrap_or(head_budget.min(text.len()));
+        .unwrap_or(hb);
     let head = &text[..head_end];
 
-    let tail_start_raw = text.len().saturating_sub(tail_budget);
+    let mut tail_start_raw = text.len().saturating_sub(tail_budget);
+    while tail_start_raw < text.len() && !text.is_char_boundary(tail_start_raw) {
+        tail_start_raw += 1;
+    }
     let tail_start = text[tail_start_raw..]
         .find('\n')
         .map(|p| tail_start_raw + p + 1)

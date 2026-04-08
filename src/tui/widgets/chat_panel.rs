@@ -37,6 +37,8 @@ pub struct ChatPanel<'a> {
     pub is_streaming: bool,
     pub spinner_frame: usize,
     pub scroll_offset: usize,
+    /// Selection range: (start_line, start_col, end_line, end_col) in visible coordinates.
+    pub selection: Option<(usize, u16, usize, u16)>,
 }
 
 impl<'a> ChatPanel<'a> {
@@ -140,6 +142,29 @@ impl<'a> ChatPanel<'a> {
 
         lines
     }
+
+    /// Calculate scroll info: (view_start, total_lines) for the given area height.
+    pub fn calc_view(&self, width: u16, visible_height: usize) -> (usize, usize) {
+        let total = self.build_lines(width).len();
+        let start = if total <= visible_height {
+            0
+        } else {
+            let max_scroll = total - visible_height;
+            let actual_offset = self.scroll_offset.min(max_scroll);
+            total - visible_height - actual_offset
+        };
+        (start, total)
+    }
+
+    /// Build plain text lines (for clipboard copy).
+    pub fn build_plain_lines(&self, width: u16) -> Vec<String> {
+        self.build_lines(width)
+            .iter()
+            .map(|line| {
+                line.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+            })
+            .collect()
+    }
 }
 
 impl<'a> Widget for ChatPanel<'a> {
@@ -169,5 +194,41 @@ impl<'a> Widget for ChatPanel<'a> {
 
         let paragraph = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
         paragraph.render(inner, buf);
+
+        // Highlight selected text
+        if let Some((sel_start_line, sel_start_col, sel_end_line, sel_end_col)) = self.selection {
+            let highlight = Style::default()
+                .bg(Color::Rgb(60, 80, 120))
+                .fg(Color::White);
+
+            for vis_row in 0..visible_height {
+                let abs_line = start + vis_row;
+                if abs_line < sel_start_line || abs_line > sel_end_line {
+                    continue;
+                }
+
+                let screen_y = inner.y + vis_row as u16;
+                let line_width = inner.width;
+
+                // Columns are already in text-relative coordinates
+                let col_start = if abs_line == sel_start_line {
+                    sel_start_col
+                } else {
+                    0
+                };
+                let col_end = if abs_line == sel_end_line {
+                    sel_end_col
+                } else {
+                    line_width
+                };
+
+                for x in col_start..col_end.min(line_width) {
+                    let screen_x = inner.x + x;
+                    if screen_x < buf.area.width && screen_y < buf.area.height {
+                        buf[(screen_x, screen_y)].set_style(highlight);
+                    }
+                }
+            }
+        }
     }
 }

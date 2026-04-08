@@ -6,6 +6,8 @@ mod compression;
 mod config;
 #[allow(dead_code)]
 mod input;
+#[allow(dead_code)]
+mod doctor;
 mod monitor;
 mod ollama;
 mod permissions;

@@ -43,6 +43,8 @@ crossterm = "0.28"
 ratatui = "0.29"
 # Multi-line text input widget for ratatui
 tui-textarea = "0.7"
+# Unicode display width (for text selection mapping)
+unicode-width = "0.2"
 pulldown-cmark = "0.12"
 indicatif = "0.17"
 tokio-util = { version = "0.7", features = ["codec"] }

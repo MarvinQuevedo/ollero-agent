@@ -11,13 +11,14 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers},
+    event::{DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind},
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout},
+    widgets::Widget,
     Terminal,
 };
 use tokio::sync::mpsc;
@@ -39,6 +40,8 @@ pub async fn run(config: Config, workspace_root: PathBuf, metrics: SharedMetrics
     // Setup terminal
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
+    // Mouse capture ON for scroll wheel support.
+    // To select/copy text: hold Shift while clicking/dragging (standard terminal behavior).
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -98,6 +101,9 @@ pub async fn run(config: Config, workspace_root: PathBuf, metrics: SharedMetrics
             let status = StatusBar { app: &app };
             frame.render_widget(status, chunks[0]);
 
+            // Store chat area for mouse mapping
+            app.chat_area = chunks[1];
+
             // Chat panel
             let is_streaming = matches!(
                 app.phase,
@@ -109,11 +115,30 @@ pub async fn run(config: Config, workspace_root: PathBuf, metrics: SharedMetrics
                 is_streaming,
                 spinner_frame: app.spinner_frame,
                 scroll_offset: app.scroll_offset,
+                selection: app.selection_range(),
             };
+
+            // Calculate view info for mouse mapping (before render consumes chat)
+            let inner_height = chunks[1].height.saturating_sub(0) as usize; // no top/bottom border
+            let (view_start, total_lines) = chat.calc_view(chunks[1].width, inner_height);
+            app.chat_view_start = view_start;
+            app.chat_total_lines = total_lines;
+
             frame.render_widget(chat, chunks[1]);
 
             // Input area
             frame.render_widget(&textarea, chunks[2]);
+
+            // Autocomplete popup (rendered on top of chat panel, above input)
+            let current_input = input_area::current_text(&textarea);
+            let (completions, total_count) = input_area::get_completions(&current_input);
+            if !completions.is_empty() {
+                let popup = input_area::AutocompletePopup {
+                    completions: &completions,
+                    total_count,
+                };
+                popup.render(chunks[2], frame.buffer_mut());
+            }
         })?;
 
         if app.should_quit {
@@ -132,8 +157,25 @@ pub async fn run(config: Config, workspace_root: PathBuf, metrics: SharedMetrics
                     continue;
                 }
 
-                // Global shortcuts
+                // Global shortcuts (work in any phase)
                 match (key.code, key.modifiers) {
+                    // Ctrl+C: double-tap to exit
+                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                        let input_text: String = textarea.lines().join("");
+                        if input_text.is_empty() {
+                            // No text in input → handle Ctrl+C for cancel/exit
+                            if app.handle_ctrl_c() {
+                                app.should_quit = true;
+                            }
+                            continue;
+                        } else {
+                            // Text in input → clear it, and reset Ctrl+C state
+                            textarea.select_all();
+                            textarea.cut();
+                            app.clear_ctrl_c();
+                            continue;
+                        }
+                    }
                     // Ctrl+D on empty input: quit
                     (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
                         let text: String = textarea.lines().join("");
@@ -142,7 +184,7 @@ pub async fn run(config: Config, workspace_root: PathBuf, metrics: SharedMetrics
                             continue;
                         }
                     }
-                    // PageUp / PageDown: scroll
+                    // Scroll: PageUp/Down (10 lines), Ctrl+Up/Down (3 lines)
                     (KeyCode::PageUp, _) => {
                         app.scroll_up(10);
                         continue;
@@ -151,49 +193,111 @@ pub async fn run(config: Config, workspace_root: PathBuf, metrics: SharedMetrics
                         app.scroll_down(10);
                         continue;
                     }
-                    // Escape: clear permission modal or scroll to bottom
+                    (KeyCode::Up, KeyModifiers::CONTROL) => {
+                        app.scroll_up(3);
+                        continue;
+                    }
+                    (KeyCode::Down, KeyModifiers::CONTROL) => {
+                        app.scroll_down(3);
+                        continue;
+                    }
+                    // Escape: cancel current operation OR scroll to bottom
                     (KeyCode::Esc, _) => {
-                        app.permission_prompt = None;
-                        app.scroll_to_bottom();
+                        if app.phase != AgentPhase::Idle {
+                            // Cancel streaming/tool execution
+                            app.phase = AgentPhase::Idle;
+                            app.streaming_text.clear();
+                            app.chat_messages
+                                .push(ChatMessage::System("Cancelled.".into()));
+                            app.scroll_to_bottom();
+                        } else {
+                            // Scroll to bottom when idle
+                            app.scroll_to_bottom();
+                        }
                         continue;
                     }
                     _ => {}
                 }
 
-                // If we're idle or there's a permission prompt, handle input
-                if app.phase == AgentPhase::Idle {
-                    match input_area::handle_key(&mut textarea, key) {
-                        input_area::InputAction::Submit(text) => {
-                            // Check for slash commands first
-                            if !app.handle_slash_command(&text) {
-                                app.submit_user_input(text);
-                            }
+                // Any non-Ctrl+C key clears the "press again to exit" state
+                app.clear_ctrl_c();
+
+                // Input is ALWAYS active — user can type while LLM is thinking.
+                // Submit is queued if busy; it will run after the current operation.
+                match input_area::handle_key(&mut textarea, key) {
+                    input_area::InputAction::Submit(text) => {
+                        // Check for slash commands first
+                        if app.handle_slash_command(&text) {
+                            // slash command handled
+                        } else if app.phase == AgentPhase::Idle {
+                            // Send immediately
+                            app.submit_user_input(text);
+                        } else {
+                            // Queue: show in chat, will be sent when current op finishes
+                            app.enqueue_input(text);
                         }
-                        input_area::InputAction::Quit => {
-                            app.should_quit = true;
-                        }
-                        input_area::InputAction::Consumed => {}
                     }
-                } else {
-                    // During streaming/tool execution, only allow scroll and Ctrl+C
-                    match (key.code, key.modifiers) {
-                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                            // Cancel current operation
-                            app.phase = AgentPhase::Idle;
-                            app.streaming_text.clear();
-                            app.chat_messages
-                                .push(ChatMessage::System("Cancelled.".into()));
-                        }
-                        _ => {}
+                    input_area::InputAction::Quit => {
+                        app.should_quit = true;
                     }
+                    input_area::InputAction::Consumed => {}
                 }
             }
 
             AppEvent::Mouse(mouse) => {
-                use crossterm::event::MouseEventKind;
                 match mouse.kind {
                     MouseEventKind::ScrollUp => app.scroll_up(3),
                     MouseEventKind::ScrollDown => app.scroll_down(3),
+                    MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                        // Clear previous selection and start new one
+                        app.clear_selection();
+                        if mouse.row >= app.chat_area.y
+                            && mouse.row < app.chat_area.y + app.chat_area.height
+                        {
+                            let is_double = app.start_selection(mouse.row, mouse.column);
+                            if is_double {
+                                // Double-click: select word (highlight only, no copy)
+                                let is_streaming = matches!(
+                                    app.phase,
+                                    AgentPhase::WaitingForLlm | AgentPhase::ExecutingTools
+                                );
+                                let chat = ChatPanel {
+                                    messages: &app.chat_messages,
+                                    streaming_text: &app.streaming_text,
+                                    is_streaming,
+                                    spinner_frame: app.spinner_frame,
+                                    scroll_offset: app.scroll_offset,
+                                    selection: None,
+                                };
+                                let plain = chat.build_plain_lines(app.chat_area.width);
+                                app.select_word_at(mouse.row, mouse.column, &plain);
+                            }
+                        }
+                    }
+                    MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                        app.extend_selection(mouse.row, mouse.column);
+                    }
+                    MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                        app.finish_selection();
+                        // Only copy if there's a real selection (not just a click)
+                        if app.selection_range().is_some() {
+                            let is_streaming = matches!(
+                                app.phase,
+                                AgentPhase::WaitingForLlm | AgentPhase::ExecutingTools
+                            );
+                            let chat = ChatPanel {
+                                messages: &app.chat_messages,
+                                streaming_text: &app.streaming_text,
+                                is_streaming,
+                                spinner_frame: app.spinner_frame,
+                                scroll_offset: app.scroll_offset,
+                                selection: None,
+                            };
+                            let plain = chat.build_plain_lines(app.chat_area.width);
+                            app.copy_selection_to_clipboard(&plain);
+                            app.status_message = Some("Copied!".into());
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -239,11 +343,7 @@ pub async fn run(config: Config, workspace_root: PathBuf, metrics: SharedMetrics
 
     // Restore terminal
     terminal::disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture,
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
     // Auto-save session
