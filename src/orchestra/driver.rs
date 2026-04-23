@@ -16,6 +16,7 @@ use crate::orchestra::validator;
 
 #[derive(Debug, Clone)]
 pub enum DriverEvent {
+    RunStarted(String),
     PhaseChanged(String),
     TaskStarted(TaskId),
     TaskProgress { task_id: TaskId, note: String },
@@ -78,6 +79,7 @@ async fn drive_loop(
     tx: mpsc::UnboundedSender<DriverEvent>,
 ) -> Result<FinalReport> {
     let started_at = current_unix_secs();
+    emit(&tx, DriverEvent::RunStarted(state.run_id.clone()));
     let mut pending_decision = initial_decision;
 
     loop {

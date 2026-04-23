@@ -151,6 +151,19 @@ pub struct App {
 
     // ── Event channel (for sending events from tool execution, etc.) ──
     pub event_tx: mpsc::UnboundedSender<AppEvent>,
+
+    // ── Orchestra mode ──
+    pub orchestra_run_id: Option<String>,
+    pub orchestra_events_rx: Option<mpsc::UnboundedReceiver<crate::orchestra::DriverEvent>>,
+    pub orchestra_handle: Option<tokio::task::JoinHandle<anyhow::Result<crate::orchestra::types::FinalReport>>>,
+    pub pending_escalation: Option<PendingEscalation>,
+}
+
+/// Holds the context of a worker task that needs a human decision.
+pub struct PendingEscalation {
+    pub task_id: crate::orchestra::types::TaskId,
+    pub reason: String,
+    pub report: crate::orchestra::types::ValidationReport,
 }
 
 impl App {
@@ -208,6 +221,11 @@ impl App {
             queued_input: None,
 
             event_tx,
+
+            orchestra_run_id: None,
+            orchestra_events_rx: None,
+            orchestra_handle: None,
+            pending_escalation: None,
         }
     }
 
@@ -264,6 +282,20 @@ impl App {
 
     pub fn submit_user_input(&mut self, input: String) {
         if input.is_empty() {
+            return;
+        }
+
+        // Orchestra mode: treat input as a goal or escalation decision
+        if self.mode == SessionMode::Orchestra {
+            self.chat_messages.push(ChatMessage::User(input.clone()));
+            if self.orchestra_handle.is_none() {
+                self.start_orchestra_run(input);
+            } else {
+                // User typed something while a run is active — ignore or queue hint
+                self.chat_messages.push(ChatMessage::System(
+                    "Orchestra run in progress. Use /orchestra cancel to stop.".into(),
+                ));
+            }
             return;
         }
 
@@ -556,6 +588,9 @@ impl App {
                      /mode orchestra    — multi-step structured execution\n\
                      /orchestra         — orchestra commands (list/resume/cancel)\n\
                      /policy <name>     — set orchestra failure policy (interactive/autonomous)\n\
+                     /retry [hint]      — retry escalated task (with optional hint)\n\
+                     /skip              — skip escalated task and continue\n\
+                     /abort             — abort escalated task or entire run\n\
                      /verbose           — toggle compact/verbose tool call log\n\
                      /save              — save current session to disk\n\
                      /sessions          — list saved sessions\n\
@@ -761,22 +796,37 @@ impl App {
                         }
                     }
                     _ if rest.starts_with("resume ") => {
-                        self.chat_messages.push(ChatMessage::System(
-                            "Orchestra resume is not yet implemented.".into(),
-                        ));
+                        let run_id = rest.trim_start_matches("resume ").trim().to_string();
+                        if run_id.is_empty() {
+                            self.chat_messages.push(ChatMessage::System(
+                                "Usage: /orchestra resume <run-id>".into(),
+                            ));
+                        } else if self.orchestra_handle.is_some() {
+                            self.chat_messages.push(ChatMessage::System(
+                                "A run is already active. Use /orchestra cancel first.".into(),
+                            ));
+                        } else {
+                            self.resume_orchestra_run(run_id);
+                        }
                     }
                     "cancel" => {
-                        self.chat_messages.push(ChatMessage::System(
-                            "No active Orchestra run to cancel.".into(),
-                        ));
+                        if let Some(handle) = self.orchestra_handle.take() {
+                            handle.abort();
+                            self.orchestra_events_rx = None;
+                            self.pending_escalation = None;
+                            self.chat_messages.push(ChatMessage::System(
+                                "Orchestra run cancelled.".into(),
+                            ));
+                        } else {
+                            self.chat_messages.push(ChatMessage::System(
+                                "No active Orchestra run to cancel.".into(),
+                            ));
+                        }
                     }
                     _ => {
-                        // Treat the rest as a goal to run
-                        self.chat_messages.push(ChatMessage::System(
-                            "Orchestra execution is not yet implemented. \
-                             Switch to /mode agent for now."
-                                .into(),
-                        ));
+                        // Treat the rest as a goal to run directly
+                        let goal = rest.to_string();
+                        self.start_orchestra_run(goal);
                     }
                 }
             }
@@ -1105,6 +1155,46 @@ impl App {
                 self.chat_messages
                     .push(ChatMessage::System("Unloading model...".into()));
             }
+            "/retry" => {
+                if self.pending_escalation.is_none() {
+                    self.chat_messages.push(ChatMessage::System(
+                        "No pending escalation to retry.".into(),
+                    ));
+                } else {
+                    let hint = if rest.is_empty() { None } else { Some(rest.to_string()) };
+                    self.handle_orchestra_escalation(
+                        crate::orchestra::UserDecision::Retry { hint },
+                    );
+                }
+            }
+            "/skip" => {
+                if self.pending_escalation.is_none() {
+                    self.chat_messages.push(ChatMessage::System(
+                        "No pending escalation to skip.".into(),
+                    ));
+                } else {
+                    self.handle_orchestra_escalation(
+                        crate::orchestra::UserDecision::Skip,
+                    );
+                }
+            }
+            "/abort" => {
+                if self.pending_escalation.is_some() {
+                    self.handle_orchestra_escalation(
+                        crate::orchestra::UserDecision::Abort,
+                    );
+                } else if let Some(handle) = self.orchestra_handle.take() {
+                    handle.abort();
+                    self.orchestra_events_rx = None;
+                    self.chat_messages.push(ChatMessage::System(
+                        "Orchestra run aborted.".into(),
+                    ));
+                } else {
+                    self.chat_messages.push(ChatMessage::System(
+                        "Nothing to abort.".into(),
+                    ));
+                }
+            }
             _ => {
                 // Try action expansion (expert prompts)
                 if let Some((display, prompt)) = crate::actions::try_expand(trimmed) {
@@ -1130,6 +1220,9 @@ impl App {
         if self.phase == AgentPhase::WaitingForLlm || self.phase == AgentPhase::ExecutingTools {
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
         }
+
+        // Drain Orchestra driver events on every tick
+        self.drain_orchestra_events();
 
         // Ctrl+C timeout: ~15 ticks = 3 seconds at 200ms/tick
         if self.ctrl_c_pending {
@@ -1418,5 +1511,179 @@ fn tool_call_detail(name: &str, args: &serde_json::Value) -> String {
         "glob" => s("pattern").unwrap_or_default(),
         "tree" => s("path").unwrap_or_else(|| ".".to_string()),
         _ => String::new(),
+    }
+}
+
+// ── Orchestra helpers (impl App) ──────────────────────────────────────────────
+
+impl App {
+    /// Launch a new Orchestra run for the given goal in a background task.
+    pub fn start_orchestra_run(&mut self, goal: String) {
+        if self.orchestra_handle.is_some() {
+            self.chat_messages.push(ChatMessage::System(
+                "An Orchestra run is already in progress. Wait for it to finish or /orchestra cancel.".into(),
+            ));
+            return;
+        }
+
+        self.chat_messages.push(ChatMessage::System(format!(
+            "Starting Orchestra run: \"{}\"", goal
+        )));
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = self.client.clone();
+        let workspace = self.workspace_root.clone();
+        let policy = self.orchestra_policy;
+        let ctx_size = self.config.context_size;
+        let goal_clone = goal.clone();
+
+        let handle = tokio::spawn(async move {
+            crate::orchestra::run_orchestra(
+                client,
+                workspace,
+                goal_clone,
+                policy,
+                ctx_size,
+                tx,
+            )
+            .await
+        });
+
+        self.orchestra_handle = Some(handle);
+        self.orchestra_events_rx = Some(rx);
+        self.mode = SessionMode::Orchestra;
+    }
+
+    /// Drain pending Orchestra driver events and render them as chat messages.
+    /// Called on every tick.
+    pub fn drain_orchestra_events(&mut self) {
+        use crate::orchestra::DriverEvent;
+
+        let mut events = Vec::new();
+        if let Some(rx) = &mut self.orchestra_events_rx {
+            while let Ok(ev) = rx.try_recv() {
+                events.push(ev);
+            }
+        }
+
+        for ev in events {
+            let msg = match ev {
+                DriverEvent::RunStarted(run_id) => {
+                    self.orchestra_run_id = Some(run_id.clone());
+                    ChatMessage::System(format!("[run] {run_id}"))
+                }
+                DriverEvent::PhaseChanged(p) => {
+                    ChatMessage::System(format!("[phase] {p}"))
+                }
+                DriverEvent::TaskStarted(id) => {
+                    ChatMessage::System(format!("▶ Task started: {id}"))
+                }
+                DriverEvent::TaskProgress { task_id, note } => {
+                    ChatMessage::System(format!("  {task_id}: {note}"))
+                }
+                DriverEvent::TaskFinished { task_id, verdict } => {
+                    let glyph = match verdict.as_str() {
+                        "Ok" => "✓",
+                        "Failed" => "✗",
+                        _ => "⚠",
+                    };
+                    ChatMessage::System(format!("{glyph} {task_id}: {verdict}"))
+                }
+                DriverEvent::UserEscalationNeeded { task_id, reason, report } => {
+                    self.pending_escalation = Some(PendingEscalation {
+                        task_id: task_id.clone(),
+                        reason: reason.clone(),
+                        report,
+                    });
+                    ChatMessage::System(format!(
+                        "⚠ Escalation needed for {task_id}: {reason}\n\
+                         Reply with: /retry [hint] | /skip | /abort"
+                    ))
+                }
+                DriverEvent::RunFinished(fr) => {
+                    self.orchestra_run_id = Some(fr.run_id.clone());
+                    self.orchestra_handle = None;
+                    self.orchestra_events_rx = None;
+                    self.pending_escalation = None;
+                    ChatMessage::System(format!(
+                        "Orchestra run complete.\n{}", fr.summary
+                    ))
+                }
+            };
+            self.chat_messages.push(msg);
+            self.scroll_to_bottom();
+        }
+
+        // Check if the handle completed
+        let finished = self.orchestra_handle
+            .as_ref()
+            .map(|h| h.is_finished())
+            .unwrap_or(false);
+
+        if finished {
+            // RunFinished event already shows the result; just clean up the handle.
+            self.orchestra_handle = None;
+            self.orchestra_events_rx = None;
+        }
+    }
+
+    /// Resume an existing Orchestra run by its stored run_id.
+    pub fn resume_orchestra_run(&mut self, run_id: String) {
+        self.chat_messages.push(ChatMessage::System(format!(
+            "Resuming Orchestra run: {run_id}"
+        )));
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = self.client.clone();
+        let workspace = self.workspace_root.clone();
+        let ctx_size = self.config.context_size;
+        let id = run_id.clone();
+
+        let handle = tokio::spawn(async move {
+            crate::orchestra::resume_orchestra(
+                &id,
+                None,
+                client,
+                workspace,
+                ctx_size,
+                tx,
+            )
+            .await
+        });
+
+        self.orchestra_run_id = Some(run_id);
+        self.orchestra_handle = Some(handle);
+        self.orchestra_events_rx = Some(rx);
+        self.mode = SessionMode::Orchestra;
+    }
+
+    /// Handle an escalation decision from the user.
+    pub fn handle_orchestra_escalation(&mut self, decision: crate::orchestra::UserDecision) {
+        if let Some(esc) = self.pending_escalation.take() {
+            let run_id = self.orchestra_run_id.clone().unwrap_or_default();
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let client = self.client.clone();
+            let workspace = self.workspace_root.clone();
+            let ctx_size = self.config.context_size;
+
+            let handle = tokio::spawn(async move {
+                crate::orchestra::resume_orchestra(
+                    &run_id,
+                    Some(decision),
+                    client,
+                    workspace,
+                    ctx_size,
+                    tx,
+                )
+                .await
+            });
+
+            self.orchestra_handle = Some(handle);
+            self.orchestra_events_rx = Some(rx);
+
+            self.chat_messages.push(ChatMessage::System(format!(
+                "Resuming task {}…", esc.task_id
+            )));
+        }
     }
 }
