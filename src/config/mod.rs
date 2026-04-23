@@ -20,10 +20,27 @@ pub struct Config {
     /// Token compression mode: "always", "auto", or "manual".
     #[serde(default = "default_compression_mode")]
     pub compression_mode: String,
+    /// Orchestra failure policy: "interactive" or "autonomous".
+    #[serde(default = "default_orchestra_policy")]
+    pub orchestra_policy: String,
+    /// Maximum retry attempts per task in Orchestra mode.
+    #[serde(default = "default_orchestra_max_attempts")]
+    pub orchestra_max_attempts: u32,
+    /// Optional override model for Orchestra workers (None = use main model).
+    #[serde(default)]
+    pub orchestra_worker_model: Option<String>,
 }
 
 fn default_compression_mode() -> String {
     "auto".to_string()
+}
+
+fn default_orchestra_policy() -> String {
+    "interactive".to_string()
+}
+
+fn default_orchestra_max_attempts() -> u32 {
+    3
 }
 
 impl Default for Config {
@@ -35,6 +52,9 @@ impl Default for Config {
             model: "llama3.2".into(),
             context_size: 8192,
             compression_mode: default_compression_mode(),
+            orchestra_policy: default_orchestra_policy(),
+            orchestra_max_attempts: default_orchestra_max_attempts(),
+            orchestra_worker_model: None,
         }
     }
 }
@@ -112,6 +132,9 @@ mod tests {
             model: "test-model:7b".into(),
             context_size: 4096,
             compression_mode: "always".into(),
+            orchestra_policy: "interactive".into(),
+            orchestra_max_attempts: 3,
+            orchestra_worker_model: None,
         };
         original.save_to(&path).unwrap();
 

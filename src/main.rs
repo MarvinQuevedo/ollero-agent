@@ -11,6 +11,8 @@ mod input;
 mod doctor;
 mod monitor;
 mod ollama;
+#[allow(dead_code)]
+mod orchestra;
 mod permissions;
 #[allow(dead_code)]
 mod repl;

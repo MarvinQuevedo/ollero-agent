@@ -84,6 +84,9 @@ pub async fn run_wizard() -> Result<Config> {
         model,
         context_size: 8192,
         compression_mode: "auto".to_string(),
+        orchestra_policy: "interactive".to_string(),
+        orchestra_max_attempts: 3,
+        orchestra_worker_model: None,
     };
     config.save()?;
 
